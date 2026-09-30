@@ -1,7 +1,8 @@
 "use client";
 
 import type { Snapshot } from "./serialize";
-import type { Category, Role } from "./types";
+import type { Category, Role, GenerationRecord, MintingBlock, AuditRecord, BurnRecord } from "./types";
+import type { AuditVerificationResult } from "./blockchain/auditLedger";
 
 async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -25,6 +26,54 @@ export const api = {
       body: JSON.stringify({ name, role, institution }),
     }),
 
+  // Supervisor's block + puzzle + nonce + allocation record generation
+  generateCoins: (studentId: string, amountCoins: number, governmentAuthorityId?: string) =>
+    jsonFetch<{
+      accepted: boolean;
+      generationRecord?: GenerationRecord;
+      mintingBlock?: MintingBlock;
+      auditRecord?: AuditRecord;
+      error?: string;
+    }>("/api/mint", {
+      method: "POST",
+      body: JSON.stringify({ studentId, amountCoins, governmentAuthorityId }),
+    }),
+
+  // Expiry burn & atomic INR return
+  burn: (generationId: string, governmentUserId?: string) =>
+    jsonFetch<{
+      success: boolean;
+      burnRecord?: BurnRecord;
+      auditRecord?: AuditRecord;
+      error?: string;
+    }>("/api/burn", {
+      method: "POST",
+      body: JSON.stringify({ generationId, governmentUserId }),
+    }),
+
+  // Audit chain verification
+  verifyAudit: () => jsonFetch<AuditVerificationResult>("/api/audit/verify"),
+
+  // Decrypt AES-256-GCM transaction payload
+  decrypt: (ciphertext: string, iv: string, tag: string) =>
+    jsonFetch<{ success: boolean; decrypted?: unknown; error?: string }>("/api/decrypt", {
+      method: "POST",
+      body: JSON.stringify({ ciphertext, iv, tag }),
+    }),
+
+  // Demo clock fast-forward
+  setDemoClock: (params: { offsetDays?: number; reset?: boolean; targetDate?: string }) =>
+    jsonFetch<{
+      success: boolean;
+      effectiveTime: number;
+      effectiveDate: string;
+      offsetMs: number;
+    }>("/api/demo-clock", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+
+  // Legacy wallet mint
   mint: (to: string, amount: number, memo?: string) =>
     jsonFetch<SubmitResponse>("/api/mint", {
       method: "POST",

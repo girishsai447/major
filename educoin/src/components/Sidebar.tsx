@@ -11,7 +11,10 @@ export function Sidebar() {
   const { enabled, stage } = useStage();
 
   return (
-    <aside className="hidden w-64 shrink-0 border-r border-[var(--border)] bg-white/70 lg:flex lg:flex-col">
+    <aside
+      suppressHydrationWarning
+      className="hidden w-64 shrink-0 border-r border-[var(--border)] bg-white/70 lg:flex lg:flex-col"
+    >
       <div className="flex items-center gap-2.5 px-5 py-5">
         <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-lg font-bold text-white shadow">
           ₹

@@ -222,6 +222,22 @@ export default function ContractPage() {
                   ✗ Tuition → vendor
                 </button>
               )}
+              {student && everyone.find((w) => w.role === "INSTITUTION" && w.name !== student.institution) && (
+                <button
+                  onClick={() => {
+                    const otherInst = everyone.find(
+                      (w) => w.role === "INSTITUTION" && w.name !== student.institution
+                    );
+                    if (otherInst) {
+                      run({ from: student.address, to: otherInst.address, category: "TUITION", amount: 10000 });
+                    }
+                  }}
+                  className="rounded-full bg-rose-50 px-2.5 py-1 text-xs font-medium text-rose-700 hover:bg-rose-100"
+                  title="A student trying to pay tuition fees to a different college"
+                >
+                  ✗ Wrong college tuition (R5b)
+                </button>
+              )}
               {student && inst && (
                 <button
                   onClick={() => run({ from: student.address, to: inst.address, category: "HOSTEL", amount: 9_999_999 })}

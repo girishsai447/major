@@ -13,7 +13,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
     <StageProvider>
       <ChainDataProvider>
         <DemoOverlay />
-        <div className="flex min-h-screen">
+        <div className="flex min-h-screen" suppressHydrationWarning>
           <Sidebar />
           <div className="flex min-w-0 flex-1 flex-col">
             <MobileNav />

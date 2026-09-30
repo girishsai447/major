@@ -117,6 +117,13 @@ export const CONTRACT_RULES: {
     scope: "sector",
   },
   {
+    id: "R5b",
+    title: "Enrolled college fee restriction",
+    description:
+      "A student may pay tuition, examination, or hostel fees only to their respective enrolled college. Attempts to pay fees to another college are strictly rejected.",
+    scope: "sector",
+  },
+  {
     id: "R8",
     title: "Category spending caps",
     description:
@@ -280,6 +287,38 @@ export function validateTransaction(
         } else {
           checks.push(
             fail("R5", `"${CATEGORY_LABELS[tx.category]}" cannot be paid to a ${ROLE_LABELS[recipient.role]}.`)
+          );
+        }
+      }
+
+      // R5b — Enrolled college restriction:
+      // A student can pay tuition, examination, or hostel fees ONLY to their respective enrolled college!
+      if (sender && sender.role === "STUDENT" && recipient && recipient.role === "INSTITUTION") {
+        if (sender.institution) {
+          const collegeMatches =
+            recipient.name.trim().toLowerCase() === sender.institution.trim().toLowerCase() ||
+            (recipient.institution &&
+              recipient.institution.trim().toLowerCase() === sender.institution.trim().toLowerCase());
+
+          if (collegeMatches) {
+            checks.push(
+              pass(
+                "R5b",
+                `Enrolled college verified: ${sender.name} is enrolled at ${sender.institution}, matching recipient institution ${recipient.name}.`
+              )
+            );
+          } else {
+            const feeType = tx.category ? CATEGORY_LABELS[tx.category] : "fees";
+            checks.push(
+              fail(
+                "R5b",
+                `Cross-college payment rejected: ${sender.name} is enrolled at ${sender.institution} and cannot pay ${feeType} to ${recipient.name}. A student may pay tuition and college fees only to their respective enrolled college.`
+              )
+            );
+          }
+        } else {
+          checks.push(
+            pass("R5b", `No enrolled college restriction recorded for student ${sender.name}.`)
           );
         }
       }

@@ -1,66 +1,169 @@
 import { Blockchain } from "./blockchain/blockchain";
 import type { Stage } from "@/config/stage";
+import type { StudentRecord } from "./types";
 
 /**
  * Seed a realistic scholarship scenario for demonstrations.
- *
- * Featuring the project team as students is a deliberate, friendly touch for
- * the live viva. The scenario exercises every part of the system: reserve
- * funding, issuance, approved spends across all categories, a redemption
- * (settlement), an expired scholarship awaiting clawback, and several attempts
- * the smart contract must reject — populating the audit trail with variety.
- *
- * We always seed with full smart-contract validation (stage 5) so the data is
- * internally consistent no matter which stage the UI is currently showing.
+ * Featuring the project team as students with academic completion dates,
+ * INR reserve funding, puzzle-based coin generation records, hash-chained audit
+ * ledger entries, and an expired scholarship record ready for demonstration burn.
  */
 export function seedDemoScenario(chain: Blockchain, _stage: Stage): void {
   const SEED_STAGE = 5 as Stage;
 
-  // --- Participants -------------------------------------------------------
-  chain.addWallet("Government Treasury", "GOVERNMENT");
+  // --- 0) Pre-register Students with Academic Levels & Completion Dates -----
+  const students: StudentRecord[] = [
+    {
+      studentId: "STU001",
+      name: "Girish Sai Tipirneni",
+      instituteId: "INST-VNR",
+      instituteName: "VNR VJIET",
+      academicLevel: "3rd Year (B.Tech CSE)",
+      // June 30, 2027
+      academicCompletionDate: new Date("2027-06-30T23:59:59Z").getTime(),
+    },
+    {
+      studentId: "STU002",
+      name: "Ravva Sai Sanjeeth",
+      instituteId: "INST-VNR",
+      instituteName: "VNR VJIET",
+      academicLevel: "3rd Year (B.Tech CSE)",
+      academicCompletionDate: new Date("2027-06-30T23:59:59Z").getTime(),
+    },
+    {
+      studentId: "STU003",
+      name: "Siddhartha Brahmanapally",
+      instituteId: "INST-VNR",
+      instituteName: "VNR VJIET",
+      academicLevel: "3rd Year (B.Tech CSE)",
+      academicCompletionDate: new Date("2027-06-30T23:59:59Z").getTime(),
+    },
+    {
+      studentId: "STU004",
+      name: "Venuturla Jeevan Manikanta Reddy",
+      instituteId: "INST-CBIT",
+      instituteName: "CBIT",
+      academicLevel: "3rd Year (B.Tech CSE)",
+      academicCompletionDate: new Date("2027-06-30T23:59:59Z").getTime(),
+    },
+    {
+      studentId: "STU005",
+      name: "Aisha Khan",
+      instituteId: "INST-CBIT",
+      instituteName: "CBIT",
+      academicLevel: "2nd Year (B.Tech IT)",
+      // June 30, 2028
+      academicCompletionDate: new Date("2028-06-30T23:59:59Z").getTime(),
+    },
+    {
+      studentId: "STU006",
+      name: "Rahul Nair (Lapsed / Expired)",
+      instituteId: "INST-CBIT",
+      instituteName: "CBIT",
+      academicLevel: "Graduated (4th Year)",
+      // Past completion date (e.g. June 30, 2025) so expiry and burn can be demonstrated live
+      academicCompletionDate: new Date("2025-06-30T23:59:59Z").getTime(),
+    },
+  ];
+
+  for (const s of students) {
+    chain.addStudent(s);
+  }
+
+  // --- 1) Wallets for existing transfer/settlement demonstration ----------
+  const govt = chain.addWallet("Government Treasury", "GOVERNMENT");
   const vnr = chain.addWallet("VNR VJIET", "INSTITUTION");
   const cbit = chain.addWallet("CBIT", "INSTITUTION");
   const bookstore = chain.addWallet("Campus Book Store", "VENDOR");
 
-  const girish = chain.addWallet("Girish Sai Tipirneni", "STUDENT", "VNR VJIET");
-  const sanjeeth = chain.addWallet("Ravva Sai Sanjeeth", "STUDENT", "VNR VJIET");
-  const siddhartha = chain.addWallet("Siddhartha Brahmanapally", "STUDENT", "VNR VJIET");
-  const jeevan = chain.addWallet("Venuturla Jeevan Manikanta Reddy", "STUDENT", "CBIT");
-  const aisha = chain.addWallet("Aisha Khan", "STUDENT", "CBIT");
-  const lapsed = chain.addWallet("Rahul Nair (lapsed)", "STUDENT", "CBIT");
+  const girishW = chain.addWallet("Girish Sai Tipirneni", "STUDENT", "VNR VJIET");
+  girishW.studentId = "STU001";
+  girishW.academicLevel = "3rd Year";
+  girishW.academicCompletionDate = students[0].academicCompletionDate;
 
-  const students = [girish, sanjeeth, siddhartha, jeevan, aisha, lapsed];
+  const sanjeethW = chain.addWallet("Ravva Sai Sanjeeth", "STUDENT", "VNR VJIET");
+  sanjeethW.studentId = "STU002";
 
-  // --- 0) Government funds the reserve that backs the peg (1 EDU = ₹100) -----
-  chain.depositReserve(400000);
+  const siddharthaW = chain.addWallet("Siddhartha Brahmanapally", "STUDENT", "VNR VJIET");
+  siddharthaW.studentId = "STU003";
 
-  // --- 1) Government issues scholarships (minting) ------------------------
-  for (const s of students) {
+  const jeevanW = chain.addWallet("Venuturla Jeevan Manikanta Reddy", "STUDENT", "CBIT");
+  jeevanW.studentId = "STU004";
+
+  const aishaW = chain.addWallet("Aisha Khan", "STUDENT", "CBIT");
+  aishaW.studentId = "STU005";
+
+  const lapsedW = chain.addWallet("Rahul Nair (lapsed)", "STUDENT", "CBIT");
+  lapsedW.studentId = "STU006";
+  lapsedW.academicCompletionDate = students[5].academicCompletionDate;
+
+  // Link addresses to student records for future wallet team
+  students[0].walletAddress = girishW.address;
+  students[1].walletAddress = sanjeethW.address;
+  students[2].walletAddress = siddharthaW.address;
+  students[3].walletAddress = jeevanW.address;
+  students[4].walletAddress = aishaW.address;
+  students[5].walletAddress = lapsedW.address;
+
+  // --- 2) Fund INR Reserve (1 EDU = ₹100 INR) ------------------------------
+  // ₹500,000 INR backs up to 5,000 EDU Coins
+  chain.depositReserve(500000);
+
+  // --- 3) Seed Generation Records (Puzzle + Nonce + Block + Audit Chaining) -
+  // Generate for Girish (STU001) - 50 EDU (₹5,000 INR)
+  chain.generateCoins({
+    studentId: "STU001",
+    amountCoins: 50,
+    governmentAuthorityId: "GOV-MINISTRY-EDU",
+  });
+
+  // Generate for Ravva Sai Sanjeeth (STU002) - 50 EDU (₹5,000 INR)
+  chain.generateCoins({
+    studentId: "STU002",
+    amountCoins: 50,
+    governmentAuthorityId: "GOV-MINISTRY-EDU",
+  });
+
+  // Generate for Siddhartha (STU003) - 50 EDU (₹5,000 INR)
+  chain.generateCoins({
+    studentId: "STU003",
+    amountCoins: 50,
+    governmentAuthorityId: "GOV-MINISTRY-EDU",
+  });
+
+  // Generate for Aisha (STU005) - 30 EDU (₹3,000 INR)
+  chain.generateCoins({
+    studentId: "STU005",
+    amountCoins: 30,
+    governmentAuthorityId: "GOV-MINISTRY-EDU",
+  });
+
+  // Generate for Rahul Nair (STU006) - Lapsed student (25 EDU = ₹2,500 INR)
+  // Has academic completion date in 2025, so it is already expired and eligible for demonstration burn!
+  chain.generateCoins({
+    studentId: "STU006",
+    amountCoins: 25,
+    governmentAuthorityId: "GOV-MINISTRY-EDU",
+  });
+
+  // --- 4) Seed standard wallet transfers & spends for existing viva stages --
+  const studentWallets = [girishW, sanjeethW, siddharthaW, jeevanW, aishaW, lapsedW];
+  for (const s of studentWallets) {
     chain.submit(
       {
         type: "MINT",
-        from: chain.treasury!.address,
+        from: govt.address,
         to: s.address,
-        amount: 50000,
+        amount: 500, // 500 EDU
         category: "ISSUANCE",
-        memo: `Merit scholarship 2026–27 issued to ${s.name}`,
+        memo: `Scholarship issuance for ${s.name}`,
       },
       SEED_STAGE
     );
   }
   chain.mine("Government Node");
 
-  // Back-date the lapsed student's scholarship so it is already expired.
-  // (Only the validity term is altered — this field is outside the block hash,
-  // so chain integrity is preserved.)
-  const expiredAt = Date.now() - 1000 * 60 * 60 * 24 * 30; // 30 days ago
-  for (const block of chain.state.chain) {
-    for (const tx of block.transactions) {
-      if (tx.type === "MINT" && tx.to === lapsed.address) tx.expiresAt = expiredAt;
-    }
-  }
-
-  // --- 2) Students spend on approved educational purposes -----------------
+  // Spend tuition, hostel, books
   const spend = (
     from: string,
     to: string,
@@ -69,49 +172,73 @@ export function seedDemoScenario(chain: Blockchain, _stage: Stage): void {
     memo: string
   ) => chain.submit({ type: "TRANSFER", from, to, amount, category, memo }, SEED_STAGE);
 
-  spend(girish.address, vnr.address, 30000, "TUITION", "Semester 5 tuition fee");
-  spend(girish.address, vnr.address, 12000, "HOSTEL", "Hostel fee (block A)");
-  spend(girish.address, bookstore.address, 2000, "BOOKS", "Reference textbooks");
-  spend(sanjeeth.address, vnr.address, 30000, "TUITION", "Semester 5 tuition fee");
-  spend(sanjeeth.address, vnr.address, 3000, "EXAMINATION", "End-sem examination fee");
+  spend(girishW.address, vnr.address, 300, "TUITION", "Semester 5 tuition fee");
+  spend(girishW.address, vnr.address, 120, "HOSTEL", "Hostel fee (block A)");
+  spend(girishW.address, bookstore.address, 20, "BOOKS", "Reference textbooks");
+  spend(sanjeethW.address, vnr.address, 300, "TUITION", "Semester 5 tuition fee");
+  spend(sanjeethW.address, vnr.address, 30, "EXAMINATION", "End-sem examination fee");
   chain.mine("EduCoin Validator");
 
-  spend(siddhartha.address, vnr.address, 30000, "TUITION", "Semester 5 tuition fee");
-  spend(siddhartha.address, vnr.address, 12000, "HOSTEL", "Hostel fee (block B)");
-  spend(jeevan.address, cbit.address, 28000, "TUITION", "Semester 5 tuition fee");
-  spend(jeevan.address, cbit.address, 3000, "EXAMINATION", "End-sem examination fee");
-  spend(aisha.address, cbit.address, 28000, "TUITION", "Semester 5 tuition fee");
-  spend(aisha.address, bookstore.address, 2500, "BOOKS", "Lab manuals & books");
+  spend(siddharthaW.address, vnr.address, 300, "TUITION", "Semester 5 tuition fee");
+  spend(siddharthaW.address, vnr.address, 120, "HOSTEL", "Hostel fee (block B)");
+  spend(jeevanW.address, cbit.address, 280, "TUITION", "Semester 5 tuition fee");
+  spend(aishaW.address, bookstore.address, 25, "BOOKS", "Lab manuals & books");
   chain.mine("EduCoin Validator");
 
-  // --- 3) An institution redeems EduCoin for INR (settlement) -------------
-  chain.settle(vnr.address, 40000);
+  // Institution redeems EDU for INR
+  chain.settle(vnr.address, 400);
   chain.mine("EduCoin Validator");
 
-  // --- 4) Attempts the smart contract must REJECT (audit trail) -----------
-  // (a) Student tries to cash out to another student.
+  // --- 5) Attempts the smart contract must REJECT (Audit trail demonstration) ---
+  // (a) Cross-college tuition rejection (R5b): Girish (VNR VJIET) tries to pay tuition to CBIT
   chain.submit(
-    { type: "TRANSFER", from: girish.address, to: sanjeeth.address, amount: 5000, category: "TUITION", memo: "Attempted peer transfer (cash-out)" },
+    {
+      type: "TRANSFER",
+      from: girishW.address,
+      to: cbit.address,
+      amount: 100,
+      category: "TUITION",
+      memo: "Attempted cross-college tuition payment to CBIT",
+    },
     SEED_STAGE
   );
-  // (b) Wrong category for recipient — paying "tuition" to a vendor.
+
+  // (b) Student tries to cash out to another student (R4)
   chain.submit(
-    { type: "TRANSFER", from: sanjeeth.address, to: bookstore.address, amount: 1000, category: "TUITION", memo: "Attempted tuition payment to bookstore" },
+    {
+      type: "TRANSFER",
+      from: girishW.address,
+      to: sanjeethW.address,
+      amount: 50,
+      category: "TUITION",
+      memo: "Attempted peer-to-peer transfer (cash-out)",
+    },
     SEED_STAGE
   );
-  // (c) Overspend beyond remaining balance.
+
+  // (c) Paying tuition to bookstore vendor (R5)
   chain.submit(
-    { type: "TRANSFER", from: jeevan.address, to: cbit.address, amount: 999999, category: "HOSTEL", memo: "Attempted overspend" },
+    {
+      type: "TRANSFER",
+      from: sanjeethW.address,
+      to: bookstore.address,
+      amount: 20,
+      category: "TUITION",
+      memo: "Attempted tuition payment to campus bookstore",
+    },
     SEED_STAGE
   );
-  // (d) Books cap exceeded (₹5k cap; Girish already spent ₹2k on books).
+
+  // (d) Overspend beyond balance (R6)
   chain.submit(
-    { type: "TRANSFER", from: girish.address, to: bookstore.address, amount: 4000, category: "BOOKS", memo: "Attempted books spend beyond cap" },
-    SEED_STAGE
-  );
-  // (e) Spending an expired scholarship.
-  chain.submit(
-    { type: "TRANSFER", from: lapsed.address, to: cbit.address, amount: 10000, category: "TUITION", memo: "Attempted spend after expiry" },
+    {
+      type: "TRANSFER",
+      from: jeevanW.address,
+      to: cbit.address,
+      amount: 999999,
+      category: "HOSTEL",
+      memo: "Attempted overspend beyond balance",
+    },
     SEED_STAGE
   );
 }

@@ -11,7 +11,10 @@ export function MobileNav() {
   const items = NAV.filter((n) => (n.feature ? enabled(n.feature) : true));
 
   return (
-    <header className="sticky top-0 z-30 border-b border-[var(--border)] bg-white/80 backdrop-blur lg:hidden">
+    <header
+      suppressHydrationWarning
+      className="sticky top-0 z-30 border-b border-[var(--border)] bg-white/80 backdrop-blur lg:hidden"
+    >
       <div className="flex items-center gap-2 px-4 py-3">
         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 font-bold text-white">
           ₹
