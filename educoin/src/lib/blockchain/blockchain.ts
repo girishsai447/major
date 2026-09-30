@@ -11,12 +11,32 @@ import {
   signMessage,
   verifySignature,
   txSigningPayload,
+  sha256,
 } from "./crypto";
+import { solvePuzzle, buildPuzzleString } from "./puzzle";
+import {
+  encryptRecordPayload,
+  decryptRecordPayload,
+  computeAuditHash,
+  verifyAuditChain,
+  GENESIS_AUDIT_HASH,
+  type AuditVerificationResult,
+} from "./auditLedger";
+import {
+  parseCoinsToBaseUnits,
+  formatBaseUnitsToExact,
+  formatBaseUnitsToDisplay,
+  baseUnitsToInr,
+  maxMintableCoins,
+  BASE_UNIT,
+  COIN_VALUE_INR,
+} from "../decimal";
 import { validateTransaction, type ValidationContext } from "./smartContract";
 import { isFeatureEnabled } from "@/config/features";
 import { CURRENT_STAGE, type Stage } from "@/config/stage";
 import {
   SCHOLARSHIP_TERM_MS,
+  SIX_MONTHS_MS,
   type Balance,
   type Block,
   type ChainState,
@@ -24,6 +44,12 @@ import {
   type Role,
   type Transaction,
   type Wallet,
+  type StudentRecord,
+  type MintingBlock,
+  type GenerationRecord,
+  type BurnRecord,
+  type AuditRecord,
+  type GenerationStatus,
 } from "../types";
 
 export interface SubmitInput {
@@ -47,10 +73,6 @@ export interface ChainIntegrity {
   blocksChecked: number;
 }
 
-/**
- * The EduCoin blockchain. Wraps a serializable ChainState so it can be
- * persisted to disk between requests.
- */
 export const EDU_COIN_VALUE_INR = 100;
 
 export class Blockchain {
@@ -58,17 +80,38 @@ export class Blockchain {
 
   constructor(state: ChainState) {
     this.state = state;
+    // Ensure all new structures are initialized if loading an older state
+    if (!this.state.mintingBlocks) this.state.mintingBlocks = [];
+    if (!this.state.generationRecords) this.state.generationRecords = [];
+    if (!this.state.burnRecords) this.state.burnRecords = [];
+    if (!this.state.auditLedger) this.state.auditLedger = [];
+    if (!this.state.students) this.state.students = [];
+    if (this.state.demoClockOffsetMs === undefined) this.state.demoClockOffsetMs = 0;
+  }
+
+  /** Current effective time (supports demo clock fast-forwarding). */
+  getEffectiveTime(): number {
+    return Date.now() + (this.state.demoClockOffsetMs || 0);
+  }
+
+  setDemoClockOffset(offsetMs: number): void {
+    this.state.demoClockOffsetMs = offsetMs;
   }
 
   /** Maximum whole EDU coins that can be issued against the current reserve. */
   maximumReserveBackedCoins(): number {
-    return Math.floor(this.state.reserveINR / EDU_COIN_VALUE_INR);
+    return Math.floor(Math.max(0, this.state.reserveINR) / EDU_COIN_VALUE_INR);
   }
 
-  /** Create a fresh chain with a genesis block. */
+  /** Create a fresh chain with genesis block and empty collections. */
   static create(difficulty = 3, miningReward = 0): Blockchain {
     const state: ChainState = {
       chain: [createGenesisBlock()],
+      mintingBlocks: [],
+      generationRecords: [],
+      burnRecords: [],
+      auditLedger: [],
+      students: [],
       mempool: [],
       wallets: [],
       rejected: [],
@@ -76,6 +119,7 @@ export class Blockchain {
       miningReward,
       createdAt: Date.now(),
       reserveINR: 0,
+      demoClockOffsetMs: 0,
     };
     return new Blockchain(state);
   }
@@ -109,8 +153,466 @@ export class Blockchain {
     return wallet;
   }
 
-  // --------------------------------------------------------------- balances
-  /** Confirmed on-chain balance (only counts mined transactions). */
+  // --------------------------------------------------------------- students
+  get studentMap(): Map<string, StudentRecord> {
+    return new Map(this.state.students.map((s) => [s.studentId, s]));
+  }
+
+  getStudent(studentId: string): StudentRecord | undefined {
+    return this.studentMap.get(studentId);
+  }
+
+  addStudent(student: StudentRecord): void {
+    const existingIdx = this.state.students.findIndex((s) => s.studentId === student.studentId);
+    if (existingIdx >= 0) {
+      this.state.students[existingIdx] = student;
+    } else {
+      this.state.students.push(student);
+    }
+  }
+
+  // -------------------------------------------------- 18-decimal supply & reserve
+  /** Total coins generated across all generation records (in 18-decimal base units). */
+  totalGeneratedBaseUnits(): bigint {
+    let total = 0n;
+    for (const record of this.state.generationRecords) {
+      try {
+        total += BigInt(record.coinsGenerated || "0");
+      } catch {
+        // fallback
+      }
+    }
+    return total;
+  }
+
+  /** Total coins burned across all burn records (in 18-decimal base units). */
+  totalBurnedBaseUnits(): bigint {
+    let total = 0n;
+    for (const record of this.state.burnRecords) {
+      try {
+        total += BigInt(record.coinsBurned || "0");
+      } catch {
+        // fallback
+      }
+    }
+    return total;
+  }
+
+  /** Total circulating coins in base units (Generated − Burned). */
+  circulatingBaseUnits(): bigint {
+    const gen = this.totalGeneratedBaseUnits();
+    const brn = this.totalBurnedBaseUnits();
+    return gen >= brn ? gen - brn : 0n;
+  }
+
+  /** Human-readable circulating coins display number. */
+  circulatingCoinsDisplay(): number {
+    return formatBaseUnitsToDisplay(this.circulatingBaseUnits());
+  }
+
+  /** Remaining minting capacity according to supervisor formula. */
+  remainingMintingCapacity(): {
+    wholeCoins: number;
+    baseUnits: string;
+    reserveINR: number;
+    circulatingCoinsDisplay: number;
+  } {
+    const circulating = this.circulatingBaseUnits();
+    // Circulating value in INR
+    const circulatingInr = baseUnitsToInr(circulating).inrWhole;
+    const remainingInr = Math.max(0, this.state.reserveINR - circulatingInr);
+    const wholeCoins = Math.floor(remainingInr / EDU_COIN_VALUE_INR);
+    const maxBase = maxMintableCoins(this.state.reserveINR);
+    const remBase = maxBase >= circulating ? maxBase - circulating : 0n;
+
+    return {
+      wholeCoins,
+      baseUnits: remBase.toString(),
+      reserveINR: this.state.reserveINR,
+      circulatingCoinsDisplay: this.circulatingCoinsDisplay(),
+    };
+  }
+
+  depositReserve(amount: number): void {
+    this.state.reserveINR += Math.max(0, amount);
+  }
+
+  // -------------------------------------------------- Core Coin Generation (Puzzle + Nonce)
+  /**
+   * Supervisor Specification:
+   * 1. Government selects student
+   * 2. Reserve verification: Existing Minted + New <= floor(Reserve / 100)
+   * 3. Student Expiry = Student Academic Completion Date
+   * 4. Institute Expiry = Student Expiry + 6 months
+   * 5. Modular puzzle generation & nonce solving
+   * 6. Minting block creation
+   * 7. Allocation record (GEN00001) with Status: GENERATED, Wallet Status: NOT LINKED
+   * 8. AES-256-GCM encryption of payload
+   * 9. Hash-chained audit ledger entry
+   */
+  generateCoins(input: {
+    studentId: string;
+    amountCoins: number;
+    governmentAuthorityId?: string;
+  }): {
+    success: boolean;
+    error?: string;
+    generationRecord?: GenerationRecord;
+    mintingBlock?: MintingBlock;
+    auditRecord?: AuditRecord;
+  } {
+    const { studentId, amountCoins, governmentAuthorityId = "GOV-TREASURY-01" } = input;
+
+    if (!studentId) {
+      return { success: false, error: "Student selection is required." };
+    }
+    if (!amountCoins || amountCoins <= 0) {
+      return { success: false, error: "Number of coins must be greater than zero." };
+    }
+
+    const student = this.getStudent(studentId);
+    if (!student) {
+      return { success: false, error: `Student with ID ${studentId} not found in government records.` };
+    }
+
+    // 18-decimal base unit check against reserve
+    const newCoinsBaseUnits = parseCoinsToBaseUnits(amountCoins);
+    const currentCirculating = this.circulatingBaseUnits();
+    const projectedCirculating = currentCirculating + newCoinsBaseUnits;
+    const maxCoinsBaseUnits = maxMintableCoins(this.state.reserveINR);
+
+    if (projectedCirculating > maxCoinsBaseUnits) {
+      const maxWhole = this.maximumReserveBackedCoins();
+      const currentWhole = formatBaseUnitsToDisplay(currentCirculating);
+      return {
+        success: false,
+        error: `Reserve backing exceeded: Current reserve ₹${this.state.reserveINR.toLocaleString()} backs a maximum of ${maxWhole} EDU Coins. Currently circulating: ${currentWhole} EDU. Minting ${amountCoins} EDU would exceed reserve capacity.`,
+      };
+    }
+
+    const now = this.getEffectiveTime();
+    const studentExpiry = student.academicCompletionDate;
+    const instituteExpiry = studentExpiry + SIX_MONTHS_MS;
+    const coinValue = EDU_COIN_VALUE_INR;
+    const totalValueInr = amountCoins * coinValue;
+
+    // Sequential ID generation
+    const genIndex = this.state.generationRecords.length + 1;
+    const generationId = `GEN${String(genIndex).padStart(5, "0")}`;
+
+    const blockIndex = this.state.mintingBlocks.length + 1;
+    const blockId = `MBLK-${String(blockIndex).padStart(5, "0")}`;
+
+    const prevBlock = this.state.mintingBlocks[this.state.mintingBlocks.length - 1];
+    const previousBlockHash = prevBlock ? prevBlock.hash : this.state.chain[0]?.hash || "0".repeat(64);
+
+    // Solve Puzzle with Nonce mechanism
+    const puzzleParams = {
+      generationTimestamp: now,
+      studentId: student.studentId,
+      studentAcademicCompletionDate: student.academicCompletionDate,
+      studentCoinExpiry: studentExpiry,
+      instituteId: student.instituteId,
+      instituteExpiry,
+      reserveValue: this.state.reserveINR,
+      coinValue,
+      numberOfCoinsGenerated: newCoinsBaseUnits.toString(),
+      governmentAuthorityId,
+    };
+
+    // Use moderate difficulty (e.g. 2 or 3) for snappy responsive UX
+    const solution = solvePuzzle(puzzleParams, Math.min(3, Math.max(2, this.state.difficulty)));
+
+    // Create Minting Block
+    const mintingBlock: MintingBlock = {
+      blockId,
+      previousBlockHash,
+      generationTimestamp: now,
+      studentId: student.studentId,
+      instituteId: student.instituteId,
+      studentAcademicCompletionDate: student.academicCompletionDate,
+      studentCoinExpiry: studentExpiry,
+      instituteExpiry,
+      reserveValue: this.state.reserveINR,
+      coinValue,
+      numberOfCoinsGenerated: newCoinsBaseUnits.toString(),
+      numberOfCoinsDisplay: amountCoins,
+      nonce: solution.nonce,
+      hash: solution.hash,
+      governmentAuthorityId,
+      puzzleInput: solution.puzzleInput,
+    };
+
+    // Encrypt sensitive transaction payload using AES-256-GCM
+    const sensitivePayload = {
+      generationId,
+      blockId,
+      studentId: student.studentId,
+      studentName: student.name,
+      instituteId: student.instituteId,
+      instituteName: student.instituteName,
+      academicLevel: student.academicLevel,
+      coinsGenerated: amountCoins,
+      reserveAtMint: this.state.reserveINR,
+      timestamp: now,
+      hash: solution.hash,
+    };
+    const encrypted = encryptRecordPayload(sensitivePayload);
+
+    // Create Generation / Allocation Record (NO wallet transfer)
+    const generationRecord: GenerationRecord = {
+      generationId,
+      blockId,
+      studentId: student.studentId,
+      studentName: student.name,
+      instituteId: student.instituteId,
+      instituteName: student.instituteName,
+      academicLevel: student.academicLevel,
+      coinsGenerated: newCoinsBaseUnits.toString(),
+      coinsRemaining: newCoinsBaseUnits.toString(),
+      coinsBurned: "0",
+      coinsDisplay: amountCoins,
+      coinValue,
+      totalValue: totalValueInr,
+      studentExpiry,
+      instituteExpiry,
+      status: "GENERATED",
+      walletStatus: "NOT LINKED",
+      walletAddress: null,
+      generationTimestamp: now,
+      nonce: solution.nonce,
+      hash: solution.hash,
+      governmentAuthorityId,
+      encryptedPayload: encrypted,
+    };
+
+    // Create Audit Record (Chained to previous audit record)
+    const auditIndex = this.state.auditLedger.length + 1;
+    const auditId = `AUD${String(auditIndex).padStart(5, "0")}`;
+    const prevAudit = this.state.auditLedger[this.state.auditLedger.length - 1];
+    const previousAuditHash = prevAudit ? prevAudit.currentAuditHash : GENESIS_AUDIT_HASH;
+
+    const auditDraft: Omit<AuditRecord, "currentAuditHash"> = {
+      auditId,
+      generationId,
+      blockId,
+      governmentUserId: governmentAuthorityId,
+      studentId: student.studentId,
+      instituteId: student.instituteId,
+      timestamp: now,
+      reserveValue: this.state.reserveINR,
+      coinsGenerated: newCoinsBaseUnits.toString(),
+      coinsGeneratedDisplay: amountCoins,
+      coinValue,
+      studentExpiry,
+      instituteExpiry,
+      nonce: solution.nonce,
+      hash: solution.hash,
+      eventType: "COIN_GENERATION",
+      previousAuditHash,
+    };
+    const currentAuditHash = computeAuditHash(auditDraft);
+    const auditRecord: AuditRecord = {
+      ...auditDraft,
+      currentAuditHash,
+    };
+
+    // Commit all state atomically
+    this.state.mintingBlocks.push(mintingBlock);
+    this.state.generationRecords.push(generationRecord);
+    this.state.auditLedger.push(auditRecord);
+
+    return {
+      success: true,
+      generationRecord,
+      mintingBlock,
+      auditRecord,
+    };
+  }
+
+  // -------------------------------------------------- Expiry Burn & INR Return
+  /**
+   * Scan for expired generation records according to effective time.
+   */
+  getExpiredGenerations(effectiveTime = this.getEffectiveTime()): {
+    studentExpired: GenerationRecord[];
+    instituteExpired: GenerationRecord[];
+    eligibleForBurn: GenerationRecord[];
+  } {
+    const studentExpired: GenerationRecord[] = [];
+    const instituteExpired: GenerationRecord[] = [];
+    const eligibleForBurn: GenerationRecord[] = [];
+
+    for (const record of this.state.generationRecords) {
+      if (record.status === "BURNED") continue;
+      const remBase = BigInt(record.coinsRemaining || "0");
+      if (remBase <= 0n) continue;
+
+      if (effectiveTime > record.instituteExpiry) {
+        instituteExpired.push(record);
+        eligibleForBurn.push(record);
+      } else if (effectiveTime > record.studentExpiry) {
+        studentExpired.push(record);
+        eligibleForBurn.push(record);
+      }
+    }
+
+    return { studentExpired, instituteExpired, eligibleForBurn };
+  }
+
+  /**
+   * Burn expired coins and return INR to reserve atomically:
+   * INR Value = Expired Coins x 100
+   * 18-decimal base units
+   */
+  burnExpiredCoins(input: {
+    generationId: string;
+    governmentUserId?: string;
+  }): {
+    success: boolean;
+    error?: string;
+    burnRecord?: BurnRecord;
+    auditRecord?: AuditRecord;
+  } {
+    const { generationId, governmentUserId = "GOV-TREASURY-01" } = input;
+    const record = this.state.generationRecords.find((r) => r.generationId === generationId);
+
+    if (!record) {
+      return { success: false, error: `Generation record ${generationId} not found.` };
+    }
+    if (record.status === "BURNED") {
+      return { success: false, error: `Generation record ${generationId} has already been burned.` };
+    }
+
+    const now = this.getEffectiveTime();
+    let expiryType: "STUDENT" | "INSTITUTE" = "STUDENT";
+    let expiryDate = record.studentExpiry;
+
+    if (now > record.instituteExpiry) {
+      expiryType = "INSTITUTE";
+      expiryDate = record.instituteExpiry;
+    } else if (now > record.studentExpiry) {
+      expiryType = "STUDENT";
+      expiryDate = record.studentExpiry;
+    } else {
+      const studentDateStr = new Date(record.studentExpiry).toLocaleDateString();
+      return {
+        success: false,
+        error: `Cannot burn record ${generationId}: Student expiry is ${studentDateStr} and has not yet passed. Fast-forward the demo clock to test this!`,
+      };
+    }
+
+    const remBase = BigInt(record.coinsRemaining || "0");
+    if (remBase <= 0n) {
+      return { success: false, error: `No unspent balance remains on record ${generationId} to burn.` };
+    }
+
+    // 18-decimal exact calculation of INR to return
+    const inrCalculation = baseUnitsToInr(remBase);
+    const inrReturned = inrCalculation.inrWhole;
+    const coinsBurnedDisplay = formatBaseUnitsToDisplay(remBase);
+
+    // Track supply & reserve state before/after
+    const reserveBefore = this.state.reserveINR;
+    const circulatingBefore = this.circulatingBaseUnits().toString();
+
+    // Atomic update: Credit reserve, mark burned
+    this.state.reserveINR += inrReturned;
+    const reserveAfter = this.state.reserveINR;
+    const circulatingAfter = (this.circulatingBaseUnits() - remBase).toString();
+
+    record.coinsBurned = remBase.toString();
+    record.coinsRemaining = "0";
+    record.status = "BURNED";
+    record.burnTimestamp = now;
+    record.inrReturned = inrReturned;
+
+    // Create Burn Record (BRN00001)
+    const burnIndex = this.state.burnRecords.length + 1;
+    const burnId = `BRN${String(burnIndex).padStart(5, "0")}`;
+    const burnTxHash = sha256(`BURN|${burnId}|${generationId}|${now}|${remBase.toString()}|${inrReturned}`);
+
+    const burnPayload = {
+      burnId,
+      generationId,
+      studentId: record.studentId,
+      studentName: record.studentName,
+      coinsBurned: coinsBurnedDisplay,
+      inrReturned,
+      burnTimestamp: now,
+      hash: burnTxHash,
+    };
+    const encrypted = encryptRecordPayload(burnPayload);
+
+    const burnRecord: BurnRecord = {
+      burnId,
+      generationId,
+      studentId: record.studentId,
+      studentName: record.studentName,
+      instituteId: record.instituteId,
+      expiryType,
+      expiryDate,
+      coinsBurned: remBase.toString(),
+      coinsBurnedDisplay,
+      coinValue: EDU_COIN_VALUE_INR,
+      inrReturned,
+      governmentUserId,
+      burnTimestamp: now,
+      reserveBefore,
+      reserveAfter,
+      circulatingBefore,
+      circulatingAfter,
+      burnTransactionHash: burnTxHash,
+      encryptedPayload: encrypted,
+    };
+
+    // Append to Audit Ledger (COIN_BURN)
+    const auditIndex = this.state.auditLedger.length + 1;
+    const auditId = `AUD${String(auditIndex).padStart(5, "0")}`;
+    const prevAudit = this.state.auditLedger[this.state.auditLedger.length - 1];
+    const previousAuditHash = prevAudit ? prevAudit.currentAuditHash : GENESIS_AUDIT_HASH;
+
+    const auditDraft: Omit<AuditRecord, "currentAuditHash"> = {
+      auditId,
+      generationId,
+      blockId: record.blockId,
+      governmentUserId,
+      studentId: record.studentId,
+      instituteId: record.instituteId,
+      timestamp: now,
+      reserveValue: reserveAfter,
+      coinsGenerated: remBase.toString(),
+      coinsGeneratedDisplay: coinsBurnedDisplay,
+      coinValue: EDU_COIN_VALUE_INR,
+      studentExpiry: record.studentExpiry,
+      instituteExpiry: record.instituteExpiry,
+      nonce: record.nonce,
+      hash: burnTxHash,
+      eventType: "COIN_BURN",
+      previousAuditHash,
+    };
+    const currentAuditHash = computeAuditHash(auditDraft);
+    const auditRecord: AuditRecord = {
+      ...auditDraft,
+      currentAuditHash,
+    };
+
+    this.state.burnRecords.push(burnRecord);
+    this.state.auditLedger.push(auditRecord);
+
+    return {
+      success: true,
+      burnRecord,
+      auditRecord,
+    };
+  }
+
+  // -------------------------------------------------- Audit Ledger Verification
+  verifyAuditLedger(): AuditVerificationResult {
+    return verifyAuditChain(this.state.auditLedger);
+  }
+
+  // -------------------------------------------------- Balances & Backward Compatibility
   balanceOf(address: string): number {
     let bal = 0;
     for (const block of this.state.chain) {
@@ -123,7 +625,6 @@ export class Blockchain {
     return bal;
   }
 
-  /** Confirmed balance minus funds already committed in the mempool. */
   availableBalance(address: string): number {
     let bal = this.balanceOf(address);
     for (const tx of this.state.mempool) {
@@ -154,31 +655,24 @@ export class Blockchain {
     });
   }
 
-  // ------------------------------------------------------ stablecoin / peg
-  /** Total EduCoin currently in circulation (issued − settled − reclaimed). */
   circulatingSupply(): number {
-    let supply = 0;
+    // Return display circulating count combining block txs & generation records
+    const genCirc = this.circulatingCoinsDisplay();
+    let txSupply = 0;
     for (const tx of this.allTransactions()) {
       if (tx.status !== "CONFIRMED") continue;
-      if (tx.type === "MINT") supply += tx.amount;
-      if (tx.type === "SETTLE" || tx.type === "CLAWBACK") supply -= tx.amount;
+      if (tx.type === "MINT") txSupply += tx.amount;
+      if (tx.type === "SETTLE" || tx.type === "CLAWBACK") txSupply -= tx.amount;
     }
-    return supply;
+    return Math.max(genCirc, txSupply);
   }
 
-  /** Reserve INR ÷ (circulating EDU × ₹100 per EDU). ≥ 1.0 means fully backed. */
   collateralRatio(): number {
     const circ = this.circulatingSupply();
     const requiredBacking = circ * EDU_COIN_VALUE_INR;
     return circ === 0 ? 1 : this.state.reserveINR / requiredBacking;
   }
 
-  depositReserve(amount: number): void {
-    this.state.reserveINR += Math.max(0, amount);
-  }
-
-  // ------------------------------------------------------ policy helpers
-  /** Cumulative amount a student has spent in a category (confirmed + pending). */
   spentByCategory(address: string, category: Category): number {
     let total = 0;
     const consider = (tx: Transaction) => {
@@ -192,7 +686,6 @@ export class Blockchain {
     return total;
   }
 
-  /** The end of a student's scholarship validity term (latest issuance expiry). */
   expiryOf(address: string): number | undefined {
     const mints = this.allTransactions().filter(
       (t) => t.type === "MINT" && t.to === address && t.expiresAt
@@ -201,28 +694,17 @@ export class Blockchain {
     return Math.max(...mints.map((t) => t.expiresAt!));
   }
 
-  /**
-   * Shared context object the smart contract evaluates against. The sector
-   * (education) rules are only enforced once Stage 5 unlocks `sectorPolicy`.
-   */
   contractContext(stage: Stage = CURRENT_STAGE): ValidationContext {
     return {
       walletByAddress: this.walletMap,
       balanceOf: (a) => this.availableBalance(a),
       spentByCategory: (a, c) => this.spentByCategory(a, c),
       expiryOf: (a) => this.expiryOf(a),
-      now: Date.now(),
+      now: this.getEffectiveTime(),
       sectorPolicy: isFeatureEnabled("sectorPolicy", stage),
     };
   }
 
-  // ---------------------------------------------------------- transactions
-  /**
-   * Submit a transaction. From Stage 3 onward the smart-contract policy is
-   * enforced; before that, transactions are accepted with only basic checks so
-   * the earlier milestones can still demonstrate raw ledger mechanics.
-   */
-  /** Sign a transaction with the signer wallet's private key (Ed25519). */
   private signTx(base: Transaction, signer?: Wallet): void {
     if (!signer?.privateKey) return;
     const payload = txSigningPayload(base);
@@ -231,7 +713,7 @@ export class Blockchain {
   }
 
   submit(input: SubmitInput, stage: Stage): SubmitResult {
-    const now = Date.now();
+    const now = this.getEffectiveTime();
     const base: Transaction = {
       id: randomId(),
       type: input.type,
@@ -244,7 +726,6 @@ export class Blockchain {
       status: "PENDING",
     };
 
-    // Issuance is time-bound: scholarship EduCoin carries a validity term.
     if (input.type === "MINT") {
       const recipient = this.getWallet(input.to);
       const studentExpiry = recipient && recipient.role === "STUDENT" && recipient.academicCompletionDate
@@ -255,12 +736,10 @@ export class Blockchain {
       base.studentId = recipient?.studentId ?? recipient?.name ?? undefined;
       base.academicLevel = recipient?.academicLevel ?? undefined;
       base.academicCompletionDate = recipient?.academicCompletionDate ?? undefined;
-      base.instituteExpiryAt = studentExpiry + 1000 * 60 * 60 * 24 * 183;
+      base.instituteExpiryAt = studentExpiry + SIX_MONTHS_MS;
       base.generationId = `GEN-${Date.now().toString(36).toUpperCase()}`;
     }
 
-    // Cryptographically sign the transaction on the sender's behalf. MINT is
-    // signed by the Government Treasury.
     const signer = input.from ? this.getWallet(input.from) : this.treasury;
     this.signTx(base, signer);
 
@@ -272,8 +751,6 @@ export class Blockchain {
       return { transaction: base, accepted: false, reason };
     };
 
-    // Reserve-backed minting: the Government can only issue up to the
-    // reserve-supported cap, where 1 EDU = ₹100 INR.
     if (input.type === "MINT" && isFeatureEnabled("reserve", stage)) {
       const maxMintable = this.maximumReserveBackedCoins();
       const projected = this.circulatingSupply() + input.amount;
@@ -285,10 +762,8 @@ export class Blockchain {
     }
 
     const policyOn = isFeatureEnabled("smartContract", stage);
-
     if (policyOn) {
       const result = validateTransaction(input, this.contractContext(stage));
-      // R10 — verify the digital signature binds this tx to a registered wallet.
       const payload = txSigningPayload(base);
       const sigOk =
         !!base.signature &&
@@ -306,7 +781,6 @@ export class Blockchain {
       if (!result.ok) return reject(result.reason ?? "Policy violation.", result.checks);
       if (!sigOk) return reject("Invalid digital signature.", result.checks);
     } else {
-      // Pre-contract stages: minimal sanity checks only.
       const errors: string[] = [];
       if (input.amount <= 0) errors.push("Amount must be positive.");
       if (!this.getWallet(input.to)) errors.push("Unknown recipient wallet.");
@@ -328,8 +802,6 @@ export class Blockchain {
     return { transaction: base, accepted: true };
   }
 
-  // -------------------------------------------------------------- mining
-  /** Mine every pending transaction into a new block via proof-of-work. */
   mine(minerName = "EduCoin Validator"): { block: Block; hashes: number; ms: number } | null {
     if (this.state.mempool.length === 0) return null;
 
@@ -339,7 +811,7 @@ export class Blockchain {
     const prev = this.state.chain[this.state.chain.length - 1];
     const base: Omit<Block, "hash" | "nonce" | "merkleRoot"> = {
       index: this.state.chain.length,
-      timestamp: Date.now(),
+      timestamp: this.getEffectiveTime(),
       transactions: confirmed,
       previousHash: prev.hash,
       difficulty: this.state.difficulty,
@@ -349,8 +821,6 @@ export class Blockchain {
     this.state.chain.push(result.block);
     this.state.mempool = [];
 
-    // Settlements and clawbacks pay INR out of / return INR to the reserve as
-    // EduCoin leaves circulation — keeping the peg exactly collateralised.
     for (const tx of confirmed) {
       if (tx.type === "SETTLE" || tx.type === "CLAWBACK") {
         this.state.reserveINR = Math.max(0, this.state.reserveINR - tx.amount);
@@ -359,16 +829,9 @@ export class Blockchain {
     return result;
   }
 
-  // -------------------------------------------------- settlement / clawback
-  /**
-   * A coin holder redeems EduCoin back to the reserve for real INR (the
-   * off-ramp / redemption), burning the coin and releasing reserve fiat. This
-   * is the generic stablecoin redemption required by the abstract's Blockchain
-   * Ledger Module; any holder (except the issuer itself) may redeem.
-   */
   settle(fromAddress: string, amount: number): SubmitResult {
     const wallet = this.getWallet(fromAddress);
-    const now = Date.now();
+    const now = this.getEffectiveTime();
     const base: Transaction = {
       id: randomId(),
       type: "SETTLE",
@@ -398,13 +861,9 @@ export class Blockchain {
     return { transaction: base, accepted: true };
   }
 
-  /**
-   * The Government reclaims the unspent balance of a student whose scholarship
-   * term has expired — preventing lapsed funds from lingering.
-   */
   clawback(studentAddress: string): SubmitResult {
     const wallet = this.getWallet(studentAddress);
-    const now = Date.now();
+    const now = this.getEffectiveTime();
     const amount = this.availableBalance(studentAddress);
     const base: Transaction = {
       id: randomId(),
@@ -430,19 +889,15 @@ export class Blockchain {
       return fail("This scholarship has not expired yet.");
     if (amount <= 0) return fail("No remaining balance to reclaim.");
 
-    this.signTx(base, this.treasury); // authorised by the Government
+    this.signTx(base, this.treasury);
     this.state.mempool.push(base);
     return { transaction: base, accepted: true };
   }
 
-  // ---------------------------------------------------------- integrity
-  /** Re-hash and re-link every block to detect any tampering. */
   validateChain(): ChainIntegrity {
     const errors: string[] = [];
     for (let i = 0; i < this.state.chain.length; i++) {
       const block = this.state.chain[i];
-      // Re-derive the Merkle root from the transactions: this is what makes tx
-      // tampering detectable — the header commits to it via the block hash.
       const recomputedRoot = computeMerkleRoot(block.transactions);
       if (recomputedRoot !== block.merkleRoot) {
         errors.push(`Block #${i} Merkle root mismatch — a transaction was altered.`);
@@ -464,7 +919,6 @@ export class Blockchain {
     return { valid: errors.length === 0, errors, blocksChecked: this.state.chain.length };
   }
 
-  // ------------------------------------------------------ queries / trace
   allTransactions(): Transaction[] {
     const out: Transaction[] = [];
     for (const block of this.state.chain) out.push(...block.transactions);
@@ -477,10 +931,6 @@ export class Blockchain {
     );
   }
 
-  /**
-   * Trace the flow of scholarship funds for a student: the issuance that funded
-   * them and every downstream educational spend. Powers the Stage-4 tracing UI.
-   */
   traceStudent(address: string): {
     issued: Transaction[];
     spent: Transaction[];

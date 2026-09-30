@@ -72,8 +72,133 @@ export interface Block {
   merkleRoot: string; // Merkle root of the block's transactions
 }
 
+// -----------------------------------------------------------------------------
+// New Domain Models: Students, Minting Blocks, Generation Records, Burns, Audits
+// -----------------------------------------------------------------------------
+
+export interface StudentRecord {
+  studentId: string; // e.g. STU001
+  name: string;
+  instituteId: string; // e.g. INST-VNR
+  instituteName: string;
+  academicLevel: string; // e.g. "3rd Year"
+  academicCompletionDate: number; // Unix timestamp in ms
+  walletAddress?: string | null;
+}
+
+export interface MintingBlock {
+  blockId: string; // MBLK-00001
+  previousBlockHash: string;
+  generationTimestamp: number;
+  studentId: string;
+  instituteId: string;
+  studentAcademicCompletionDate: number;
+  studentCoinExpiry: number;
+  instituteExpiry: number;
+  reserveValue: number; // in INR
+  coinValue: number; // 100
+  numberOfCoinsGenerated: string; // 18-decimal base units string
+  numberOfCoinsDisplay: number;
+  nonce: number;
+  hash: string;
+  governmentAuthorityId: string;
+  puzzleInput: string;
+}
+
+export type GenerationStatus =
+  | "GENERATED"
+  | "PARTIALLY_USED"
+  | "STUDENT_EXPIRED"
+  | "INSTITUTE_EXPIRED"
+  | "BURNED";
+
+export interface EncryptedPayload {
+  ciphertext: string;
+  iv: string;
+  tag: string;
+  algorithm: "AES-256-GCM";
+}
+
+export interface GenerationRecord {
+  generationId: string; // GEN00001
+  blockId: string;
+  studentId: string;
+  studentName: string;
+  instituteId: string;
+  instituteName: string;
+  academicLevel: string;
+  coinsGenerated: string; // 18-decimal base units string
+  coinsRemaining: string; // 18-decimal base units string
+  coinsBurned: string; // 18-decimal base units string
+  coinsDisplay: number;
+  coinValue: number; // 100
+  totalValue: number; // in INR
+  studentExpiry: number;
+  instituteExpiry: number;
+  status: GenerationStatus;
+  walletStatus: "NOT LINKED" | "LINKED";
+  walletAddress?: string | null;
+  generationTimestamp: number;
+  burnTimestamp?: number;
+  inrReturned?: number;
+  nonce: number;
+  hash: string;
+  governmentAuthorityId: string;
+  encryptedPayload?: EncryptedPayload;
+}
+
+export interface BurnRecord {
+  burnId: string; // BRN00001
+  generationId: string;
+  studentId: string;
+  studentName: string;
+  instituteId: string;
+  expiryType: "STUDENT" | "INSTITUTE";
+  expiryDate: number;
+  coinsBurned: string; // 18-decimal exact base units
+  coinsBurnedDisplay: number;
+  coinValue: number; // 100
+  inrReturned: number; // exact INR returned to reserve
+  governmentUserId: string;
+  burnTimestamp: number;
+  reserveBefore: number;
+  reserveAfter: number;
+  circulatingBefore: string;
+  circulatingAfter: string;
+  burnTransactionHash: string;
+  encryptedPayload?: EncryptedPayload;
+}
+
+export type AuditEventType = "COIN_GENERATION" | "COIN_BURN";
+
+export interface AuditRecord {
+  auditId: string; // AUD00001
+  generationId: string;
+  blockId: string;
+  governmentUserId: string;
+  studentId: string;
+  instituteId: string;
+  timestamp: number;
+  reserveValue: number;
+  coinsGenerated: string; // base units
+  coinsGeneratedDisplay: number;
+  coinValue: number; // 100
+  studentExpiry: number;
+  instituteExpiry: number;
+  nonce: number;
+  hash: string;
+  eventType: AuditEventType;
+  previousAuditHash: string;
+  currentAuditHash: string;
+}
+
 export interface ChainState {
   chain: Block[];
+  mintingBlocks: MintingBlock[];
+  generationRecords: GenerationRecord[];
+  burnRecords: BurnRecord[];
+  auditLedger: AuditRecord[];
+  students: StudentRecord[];
   mempool: Transaction[];
   wallets: Wallet[];
   rejected: Transaction[]; // audit trail of rejected attempts
@@ -81,6 +206,7 @@ export interface ChainState {
   miningReward: number;
   createdAt: number;
   reserveINR: number; // INR held in reserve to back circulating EduCoin (the peg)
+  demoClockOffsetMs?: number; // Demo clock fast-forward offset in ms
 }
 
 export interface Balance {
@@ -117,13 +243,8 @@ export const APPROVED_CATEGORIES: Category[] = [
   "BOOKS",
 ];
 
-/**
- * Per-student cumulative spending caps by category (in EDU), enforced by the
- * smart contract from Stage 3. Prevents disproportionate use of any single
- * category. Tuition is uncapped (0 = no cap) as it is the primary expense.
- */
 export const SPENDING_CAPS: Record<Category, number> = {
-  TUITION: 0, // no cap — primary educational expense
+  TUITION: 0,
   EXAMINATION: 10000,
   HOSTEL: 20000,
   BOOKS: 5000,
@@ -132,5 +253,5 @@ export const SPENDING_CAPS: Record<Category, number> = {
   CLAWBACK: 0,
 };
 
-/** How long a scholarship remains spendable before it can be reclaimed (ms). */
 export const SCHOLARSHIP_TERM_MS = 1000 * 60 * 60 * 24 * 365; // ~1 academic year
+export const SIX_MONTHS_MS = 1000 * 60 * 60 * 24 * 183; // ~6 months
