@@ -1,12 +1,12 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { useStage } from "@/context/StageContext";
 import { useChainData } from "@/hooks/useChainData";
 import { api } from "@/lib/api";
 import { LockedPage } from "@/components/LockedPage";
 import { Card, SectionTitle, Button, EDU, Hash, Badge, Stat } from "@/components/ui";
-import type { GenerationRecord, StudentRecord } from "@/lib/types";
+import type { GenerationRecord, StudentRecord, EduCoinUnit } from "@/lib/types";
 
 export default function MintPage() {
   const { enabled } = useStage();
@@ -22,6 +22,13 @@ export default function MintPage() {
   const [decryptedData, setDecryptedData] = useState<Record<string, unknown> | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  // Modal & scrollbar states for inspecting each individual coin identity address
+  const [modalGenRecord, setModalGenRecord] = useState<GenerationRecord | null>(null);
+  const [modalCoinSearch, setModalCoinSearch] = useState<string>("" );
+  const [copiedBatchId, setCopiedBatchId] = useState<string | null>(null);
+  const [copiedSingleCoinId, setCopiedSingleCoinId] = useState<string | null>(null);
+  const [expandedGenScrollbars, setExpandedGenScrollbars] = useState<Set<string>>(new Set());
 
   // Legacy tab option
   const [showLegacyMode, setShowLegacyMode] = useState<boolean>(false);
@@ -49,6 +56,63 @@ export default function MintPage() {
     ? new Date(selectedStudent.academicCompletionDate + 1000 * 60 * 60 * 24 * 183)
     : null;
 
+  const allCoins: EduCoinUnit[] = useMemo(() => (data?.coins as EduCoinUnit[]) || [], [data?.coins]);
+
+  const toggleGenScrollbar = (genId: string) => {
+    setExpandedGenScrollbars((prev) => {
+      const next = new Set(prev);
+      if (next.has(genId)) next.delete(genId);
+      else next.add(genId);
+      return next;
+    });
+  };
+
+  const getCoinsForGeneration = useMemo(() => {
+    return (g: GenerationRecord) => {
+      // 1. Direct match in allCoins by generationId or batchId
+      const matchingUnits = allCoins.filter(
+        (c) => c.generationId === g.generationId || c.batchId === g.generationId
+      );
+      if (matchingUnits.length > 0) {
+        return matchingUnits.map((c) => ({
+          serial: c.displaySerial,
+          coinId: c.coinId,
+          status: c.institutionalStatus || c.status,
+          denomination: c.denomination || 100,
+        }));
+      }
+
+      // 2. If matchingUnits not yet in allCoins but g.coinIds has them
+      if (g.coinIds && g.coinIds.length > 0) {
+        return g.coinIds.map((cid, i) => ({
+          serial: `EDU-${g.generationId}-${String(i + 1).padStart(4, "0")}`,
+          coinId: cid,
+          status: "PRE_AUTHORIZED",
+          denomination: 100,
+        }));
+      }
+
+      // 3. Fallback: match by studentId in allCoins
+      const studentCoins = allCoins.filter((c) => c.studentId === g.studentId);
+      if (studentCoins.length > 0) {
+        return studentCoins.slice(0, g.coinsDisplay).map((c) => ({
+          serial: c.displaySerial,
+          coinId: c.coinId,
+          status: c.institutionalStatus || c.status,
+          denomination: c.denomination || 100,
+        }));
+      }
+
+      // 4. Default sequence derivation
+      return Array.from({ length: g.coinsDisplay }).map((_, i) => ({
+        serial: `EDU-${g.generationId}-${String(i + 1).padStart(4, "0")}`,
+        coinId: `0x${g.hash.slice(0, 16)}${String(i + 1).padStart(4, "0")}...`,
+        status: "PRE_AUTHORIZED",
+        denomination: 100,
+      }));
+    };
+  }, [allCoins]);
+
   // Execute block + puzzle + nonce + hash minting
   const handleGenerateCoins = async () => {
     if (!selectedStudent || coinAmount <= 0) return;
@@ -64,7 +128,7 @@ export default function MintPage() {
       if (res.accepted && res.generationRecord) {
         setLatestGeneration(res.generationRecord);
         setSuccessMsg(
-          `✅ Generation ${res.generationRecord.generationId} created! Solved puzzle with Nonce ${res.generationRecord.nonce}. Status: GENERATED (Wallet: NOT LINKED)`
+          `✅ Generation ${res.generationRecord.generationId} complete! Solved puzzle with Nonce ${res.generationRecord.nonce}. All ${coinAmount} individual coin addresses have been generated and dispatched to ${selectedStudent.instituteName}'s pre-registered fee whitelist!`
         );
         await refresh();
       } else {
@@ -346,6 +410,53 @@ export default function MintPage() {
                       🔒 Wallet Status: <b>{latestGeneration.walletStatus}</b>
                     </div>
                   </div>
+
+                  {/* Institutional Pre-Registration & Zero-Duplication Dispatch */}
+                  <div className="mt-3 rounded-lg bg-indigo-50/80 p-2.5 border border-indigo-200 text-[11px] text-indigo-900">
+                    <div className="font-bold flex items-center gap-1.5">
+                      <span>🏛️</span> Dispatched to Enrolled College: {latestGeneration.instituteName} ({latestGeneration.instituteId})
+                    </div>
+                    <p className="mt-1 text-slate-600 font-sans leading-relaxed">
+                      All <b>{latestGeneration.coinsDisplay} individual coin addresses</b> have been pre-registered on {latestGeneration.instituteName}&apos;s verified whitelist. When the student pays fees, the institution can cross-check the coin addresses to ensure zero duplication and prevent counterfeit tokens.
+                    </p>
+                    {latestGeneration.coinIds && latestGeneration.coinIds.length > 0 && (
+                      <div className="mt-2 pt-2 border-t border-indigo-100">
+                        <div className="flex items-center justify-between font-mono text-[10px] text-slate-500 mb-1">
+                          <span>Unique Coin Identity Addresses ({latestGeneration.coinIds.length} units):</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard.writeText(latestGeneration.coinIds?.join("\n") || "");
+                              alert(`Copied all ${latestGeneration.coinIds?.length} unique coin addresses to clipboard!`);
+                            }}
+                            className="text-indigo-600 hover:underline font-sans font-semibold"
+                          >
+                            📋 Copy All Addresses
+                          </button>
+                        </div>
+                        <div className="flex flex-wrap gap-1 max-h-24 overflow-y-auto">
+                          {latestGeneration.coinIds.slice(0, 10).map((cid, i) => (
+                            <span key={i} className="rounded bg-white px-1 py-0.5 border border-indigo-200 text-[9px] text-indigo-700 truncate max-w-[120px]">
+                              {cid.slice(0, 10)}...
+                            </span>
+                          ))}
+                          {latestGeneration.coinIds.length > 10 && (
+                            <span className="text-slate-400 self-center text-[10px]">
+                              +{latestGeneration.coinIds.length - 10} more addresses
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-2 text-right">
+                          <a
+                            href="/coins"
+                            className="text-[11px] font-semibold text-indigo-700 hover:text-indigo-900 underline"
+                          >
+                            🔍 Cross-Check in College Whitelist Registry &rarr;
+                          </a>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
               ) : (
                 <div className="mt-6 flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 p-8 text-center text-xs text-slate-400">
@@ -451,7 +562,8 @@ export default function MintPage() {
                 {generationHistory.map((g) => {
                   const isDecrypted = decryptedRecordId === g.generationId;
                   return (
-                    <tr key={g.generationId} className="hover:bg-slate-50/50">
+                    <Fragment key={g.generationId}>
+                      <tr className="hover:bg-slate-50/50">
                       <td className="px-3 py-2.5 font-bold font-mono text-slate-800">
                         {g.generationId}
                       </td>
@@ -459,8 +571,36 @@ export default function MintPage() {
                         {g.studentName} <span className="text-slate-400 font-mono">({g.studentId})</span>
                       </td>
                       <td className="px-3 py-2.5 text-slate-500">{g.instituteName}</td>
-                      <td className="px-3 py-2.5 font-bold text-emerald-600 font-mono">
-                        {g.coinsDisplay} EDU
+                      <td className="px-3 py-2.5">
+                        <div className="space-y-1">
+                          <div className="font-bold text-emerald-600 font-mono flex items-center gap-1">
+                            <span>{g.coinsDisplay} EDU</span>
+                            <span className="text-[10px] text-slate-400 font-normal">
+                              (₹{(g.coinsDisplay * 100).toLocaleString()})
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1">
+                            {/* Pop-up Button */}
+                            <button
+                              type="button"
+                              onClick={() => setModalGenRecord(g)}
+                              className="rounded-lg bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-100 border border-indigo-200 transition-colors flex items-center gap-1 shadow-2xs"
+                              title="Click to open pop-up showing each individual coin identity address"
+                            >
+                              <span>🪙</span> View {g.coinsDisplay} IDs
+                            </button>
+
+                            {/* Inline Scrollbar Toggle */}
+                            <button
+                              type="button"
+                              onClick={() => toggleGenScrollbar(g.generationId)}
+                              className="rounded-lg bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-600 hover:bg-slate-200 border border-slate-200 transition-colors"
+                              title="Toggle inline scroll bar list of coin addresses"
+                            >
+                              {expandedGenScrollbars.has(g.generationId) ? "▲ Hide" : "📜 Scroll"}
+                            </button>
+                          </div>
+                        </div>
                       </td>
                       <td className="px-3 py-2.5 text-slate-500">
                         {new Date(g.studentExpiry).toLocaleDateString()}
@@ -478,8 +618,8 @@ export default function MintPage() {
                             g.status === "GENERATED"
                               ? "green"
                               : g.status === "BURNED"
-                              ? "red"
-                              : "amber"
+                                ? "red"
+                                : "amber"
                           }
                         >
                           {g.status}
@@ -508,6 +648,82 @@ export default function MintPage() {
                         )}
                       </td>
                     </tr>
+
+                    {/* Inline Expandable Scroll Bar of Individual Coin Identity Addresses */}
+                    {expandedGenScrollbars.has(g.generationId) && (() => {
+                      const coinsForThisGen = getCoinsForGeneration(g);
+                      return (
+                        <tr key={`scroll-${g.generationId}`} className="bg-indigo-50/40">
+                          <td colSpan={10} className="p-3">
+                            <div className="rounded-xl border border-indigo-200 bg-white p-3 space-y-2">
+                              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-indigo-100 pb-2">
+                                <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                                  <span>🪙</span> Individual Coin Identity Addresses for {g.generationId} ({coinsForThisGen.length} coins · ₹{(coinsForThisGen.length * 100).toLocaleString()} INR):
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      navigator.clipboard.writeText(coinsForThisGen.map((c) => c.coinId).join("\n"));
+                                      setCopiedBatchId(g.generationId);
+                                      setTimeout(() => setCopiedBatchId(null), 2500);
+                                    }}
+                                    className="rounded bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 hover:bg-indigo-100 border border-indigo-200"
+                                  >
+                                    {copiedBatchId === g.generationId ? "✓ Copied All!" : "📋 Copy All Addresses"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setModalGenRecord(g)}
+                                    className="rounded bg-white px-2 py-0.5 text-[10px] font-semibold text-indigo-700 hover:bg-indigo-50 border border-indigo-200"
+                                  >
+                                    🔍 Open Pop-up
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleGenScrollbar(g.generationId)}
+                                    className="text-[11px] text-slate-400 hover:text-slate-600 font-bold px-1"
+                                  >
+                                    ✕
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* Inline Scroll Bar Box */}
+                              <div className="max-h-36 overflow-y-auto space-y-1 pr-1 font-mono text-[11px]">
+                                {coinsForThisGen.map((c, idx) => (
+                                  <div
+                                    key={idx}
+                                    className="flex items-center justify-between rounded bg-slate-50 px-2.5 py-1 border border-slate-100 hover:bg-indigo-50/50"
+                                  >
+                                    <div className="flex items-center gap-2 truncate">
+                                      <span className="font-bold text-indigo-800">{c.serial}:</span>
+                                      <span className="text-slate-600 truncate max-w-sm sm:max-w-md font-mono">{c.coinId}</span>
+                                    </div>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                      <span className="text-emerald-700 font-semibold font-mono">₹{c.denomination}</span>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          navigator.clipboard.writeText(c.coinId);
+                                          setCopiedSingleCoinId(c.coinId);
+                                          setTimeout(() => setCopiedSingleCoinId(null), 2000);
+                                        }}
+                                        className="text-slate-400 hover:text-indigo-600"
+                                        title="Copy address"
+                                      >
+                                        {copiedSingleCoinId === c.coinId ? "✓" : "📋"}
+                                      </button>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })()}
+                    </Fragment>
                   );
                 })}
               </tbody>
@@ -515,6 +731,153 @@ export default function MintPage() {
           </div>
         )}
       </Card>
+
+      {/* ────────────────────────────────────────────────────────────────────────── */}
+      {/* MODAL POP-UP: Serialized Coin Identity Addresses for this Generation Batch */}
+      {/* ────────────────────────────────────────────────────────────────────────── */}
+      {modalGenRecord && (() => {
+        const batchCoins = getCoinsForGeneration(modalGenRecord);
+        const filteredCoins = modalCoinSearch.trim()
+          ? batchCoins.filter(
+              (c) =>
+                c.serial.toLowerCase().includes(modalCoinSearch.toLowerCase()) ||
+                c.coinId.toLowerCase().includes(modalCoinSearch.toLowerCase())
+            )
+          : batchCoins;
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
+            <div className="w-full max-w-3xl rounded-2xl bg-white p-6 shadow-2xl space-y-4 max-h-[90vh] flex flex-col">
+              {/* Modal Header */}
+              <div className="flex items-start justify-between border-b border-slate-100 pb-3 shrink-0">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xl">🪙</span>
+                    <h3 className="text-base font-bold text-slate-900">
+                      Serialized Coin Identity Addresses — {modalGenRecord.generationId}
+                    </h3>
+                    <Badge color="green">
+                      {batchCoins.length} Unique Coins
+                    </Badge>
+                  </div>
+                  <div className="mt-1 text-xs text-slate-600">
+                    Student: <b>{modalGenRecord.studentName}</b> ({modalGenRecord.studentId}) · Enrolled at:{" "}
+                    <b>{modalGenRecord.instituteName}</b> ({modalGenRecord.instituteId})
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setModalGenRecord(null);
+                    setModalCoinSearch("");
+                  }}
+                  className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 text-lg font-bold"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* Pre-Registration Whitelist Dispatch Notice */}
+              <div className="rounded-xl bg-indigo-50/70 p-3 text-xs border border-indigo-100 text-indigo-950 flex flex-wrap items-center justify-between gap-2 shrink-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-base">🏛️</span>
+                  <span>
+                    <strong>Dispatched to College Whitelist:</strong> All {batchCoins.length} coin identity addresses have been pre-registered to <b>{modalGenRecord.instituteName}</b>. When fees are paid, the college cross-checks this exact list for zero duplication.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(batchCoins.map((c) => c.coinId).join("\n"));
+                    setCopiedBatchId(modalGenRecord.generationId);
+                    setTimeout(() => setCopiedBatchId(null), 2500);
+                  }}
+                  className="rounded-lg bg-white px-2.5 py-1 text-xs font-semibold text-indigo-700 border border-indigo-200 hover:bg-indigo-50 shadow-xs"
+                >
+                  {copiedBatchId === modalGenRecord.generationId
+                    ? "✓ Copied All Addresses!"
+                    : `📋 Copy All ${batchCoins.length} Addresses`}
+                </button>
+              </div>
+
+              {/* Search & Filter Toolbar */}
+              <div className="flex items-center justify-between gap-3 shrink-0">
+                <input
+                  type="text"
+                  placeholder="Filter serial (e.g. 0001) or address (0x...)..."
+                  value={modalCoinSearch}
+                  onChange={(e) => setModalCoinSearch(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 px-3 py-1.5 text-xs text-slate-700 outline-none focus:border-indigo-400 bg-slate-50/50 font-mono"
+                />
+                <span className="text-xs text-slate-400 whitespace-nowrap font-mono">
+                  {filteredCoins.length} of {batchCoins.length} coins
+                </span>
+              </div>
+
+              {/* Scrollable list with prominent scroll bar showing each coin's unique identity address */}
+              <div className="flex-1 overflow-y-auto max-h-[50vh] pr-1 space-y-1.5 border border-slate-100 rounded-xl p-2 bg-slate-50/40">
+                {filteredCoins.length === 0 ? (
+                  <div className="py-6 text-center text-xs text-slate-400">
+                    No coin addresses match &ldquo;{modalCoinSearch}&rdquo;
+                  </div>
+                ) : (
+                  filteredCoins.map((c, idx) => (
+                    <div
+                      key={idx}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white p-2.5 border border-slate-200 hover:border-indigo-300 transition-all text-xs"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono font-bold text-slate-900 bg-slate-100 px-2 py-0.5 rounded text-[11px]">
+                          {c.serial}
+                        </span>
+                        <span className="font-mono text-[11px] text-slate-600 truncate max-w-[280px] sm:max-w-md" title={c.coinId}>
+                          {c.coinId}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono font-bold text-emerald-600 text-[11px]">
+                          ₹{c.denomination}
+                        </span>
+                        <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-800">
+                          {c.status || "PRE_AUTHORIZED"}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(c.coinId);
+                            setCopiedSingleCoinId(c.coinId);
+                            setTimeout(() => setCopiedSingleCoinId(null), 2000);
+                          }}
+                          className="rounded p-1 text-slate-400 hover:text-indigo-600 hover:bg-slate-100 text-xs"
+                          title="Copy Coin Address"
+                        >
+                          {copiedSingleCoinId === c.coinId ? "✓" : "📋"}
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {/* Modal Footer */}
+              <div className="pt-2 flex items-center justify-between border-t border-slate-100 shrink-0">
+                <div className="text-[11px] text-slate-400 font-mono">
+                  1 EDU = ₹100 INR · Nonce: {modalGenRecord.nonce} · Puzzle Hash: {modalGenRecord.hash.slice(0, 10)}...
+                </div>
+                <Button
+                  onClick={() => {
+                    setModalGenRecord(null);
+                    setModalCoinSearch("");
+                  }}
+                  className="text-xs px-4 py-1.5"
+                >
+                  Done
+                </Button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

@@ -9,12 +9,13 @@ export const dynamic = "force-dynamic";
 export async function POST(req: Request) {
   const stage = getRequestStage(req);
   const body = await req.json().catch(() => ({}));
-  const { from, to, amount, category, memo } = body as {
+  const { from, to, amount, category, memo, coinIds } = body as {
     from?: string;
     to?: string;
     amount?: number;
     category?: Category;
     memo?: string;
+    coinIds?: string[];
   };
 
   if (!from || !to || typeof amount !== "number") {
@@ -26,7 +27,7 @@ export async function POST(req: Request) {
 
   const chain = await getChain();
   const result = chain.submit(
-    { type: "TRANSFER", from, to, amount, category: category ?? null, memo },
+    { type: "TRANSFER", from, to, amount, category: category ?? null, memo, coinIds },
     stage
   );
   await saveChain();

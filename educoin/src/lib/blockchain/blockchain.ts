@@ -35,6 +35,13 @@ import { validateTransaction, type ValidationContext } from "./smartContract";
 import { isFeatureEnabled } from "@/config/features";
 import { CURRENT_STAGE, type Stage } from "@/config/stage";
 import {
+  mintSerializedCoinBatch,
+  verifyCoinUnits,
+  computeCoinId,
+  formatDisplaySerial,
+  computeBatchMerkleRoot,
+} from "./coinRegistry";
+import {
   SCHOLARSHIP_TERM_MS,
   SIX_MONTHS_MS,
   type Balance,
@@ -50,6 +57,10 @@ import {
   type BurnRecord,
   type AuditRecord,
   type GenerationStatus,
+  type EduCoinUnit,
+  type CoinBatch,
+  type CoinBatchVerificationResult,
+  type CoinProvenanceEntry,
 } from "../types";
 
 export interface SubmitInput {
@@ -59,6 +70,7 @@ export interface SubmitInput {
   amount: number;
   category: Category | null;
   memo?: string;
+  coinIds?: string[];
 }
 
 export interface SubmitResult {
@@ -85,6 +97,8 @@ export class Blockchain {
     if (!this.state.generationRecords) this.state.generationRecords = [];
     if (!this.state.burnRecords) this.state.burnRecords = [];
     if (!this.state.auditLedger) this.state.auditLedger = [];
+    if (!this.state.coins) this.state.coins = [];
+    if (!this.state.coinBatches) this.state.coinBatches = [];
     if (!this.state.students) this.state.students = [];
     if (this.state.demoClockOffsetMs === undefined) this.state.demoClockOffsetMs = 0;
   }
@@ -115,6 +129,8 @@ export class Blockchain {
       mempool: [],
       wallets: [],
       rejected: [],
+      coins: [],
+      coinBatches: [],
       difficulty,
       miningReward,
       createdAt: Date.now(),
@@ -122,6 +138,96 @@ export class Blockchain {
       demoClockOffsetMs: 0,
     };
     return new Blockchain(state);
+  }
+
+  // ------------------------------------------------------------- coin registry
+  get coinMap(): Map<string, EduCoinUnit> {
+    return new Map((this.state.coins ?? []).map((c) => [c.coinId, c]));
+  }
+
+  getCoins(): EduCoinUnit[] {
+    return this.state.coins ?? [];
+  }
+
+  getCoin(coinId: string): EduCoinUnit | undefined {
+    return this.coinMap.get(coinId);
+  }
+
+  getCoinsByOwner(ownerAddress: string): EduCoinUnit[] {
+    const target = ownerAddress.toLowerCase();
+    return (this.state.coins ?? []).filter((c) => c.currentOwner.toLowerCase() === target);
+  }
+
+  getBatches(): CoinBatch[] {
+    return this.state.coinBatches ?? [];
+  }
+
+  mintSerializedBatch(input: {
+    totalCoins: number;
+    allocatedStudentId?: string;
+    allocatedStudentName?: string;
+    allocatedRecipient?: string;
+    initialOwner?: string;
+    initialOwnerName?: string;
+  }): { batch: CoinBatch; coins: EduCoinUnit[] } {
+    const treasury = this.treasury;
+    if (!treasury) throw new Error("Government Treasury wallet not found");
+
+    const batchNumber = (this.state.coinBatches?.length ?? 0) + 1;
+    const now = this.getEffectiveTime();
+
+    const { batch, coins } = mintSerializedCoinBatch({
+      batchNumber,
+      totalCoins: input.totalCoins,
+      treasuryWallet: treasury,
+      timestamp: now,
+      allocatedStudentId: input.allocatedStudentId,
+      allocatedStudentName: input.allocatedStudentName,
+      allocatedRecipient: input.allocatedRecipient,
+      initialOwner: input.initialOwner ?? treasury.address,
+      initialOwnerName: input.initialOwnerName ?? treasury.name,
+    });
+
+    if (!this.state.coinBatches) this.state.coinBatches = [];
+    if (!this.state.coins) this.state.coins = [];
+
+    this.state.coinBatches.push(batch);
+    this.state.coins.push(...coins);
+
+    return { batch, coins };
+  }
+
+  verifyCoinBatch(coinIds: string[], expectedOwner?: string): CoinBatchVerificationResult {
+    const coinMap = this.coinMap;
+    const coinsToVerify: EduCoinUnit[] = [];
+
+    for (const id of coinIds) {
+      const found = coinMap.get(id);
+      if (found) {
+        coinsToVerify.push(found);
+      } else {
+        coinsToVerify.push({
+          coinId: id,
+          displaySerial: "UNKNOWN-OR-COUNTERFEIT",
+          batchId: "INVALID",
+          serialNumber: 0,
+          denomination: EDU_COIN_VALUE_INR,
+          issuer: "UNKNOWN",
+          mintedAt: 0,
+          currentOwner: "UNKNOWN",
+          status: "ACTIVE",
+          mintSignature: "",
+          history: [],
+        });
+      }
+    }
+
+    return verifyCoinUnits({
+      coins: coinsToVerify,
+      allRegisteredCoins: coinMap,
+      treasuryWallet: this.treasury,
+      expectedOwner,
+    });
   }
 
   // ------------------------------------------------------------- treasury
@@ -359,6 +465,78 @@ export class Blockchain {
     };
     const encrypted = encryptRecordPayload(sensitivePayload);
 
+    // Generate individual serialized EduCoin units with unique cryptographic addresses
+    const mintedCoins: EduCoinUnit[] = [];
+    const treasuryAddress = this.treasury?.address ?? "0x0000000000000000000000000000000000000000";
+    const studentOwner = student.walletAddress || student.studentId;
+
+    for (let i = 1; i <= amountCoins; i++) {
+      const coinId = computeCoinId(treasuryAddress, generationId, i, coinValue, now);
+      const displaySerial = `EDU-${generationId}-${String(i).padStart(4, "0")}`;
+      const mintEntry: CoinProvenanceEntry = {
+        txId: `GEN-${generationId}-${i}`,
+        from: null,
+        to: studentOwner,
+        fromName: "Government Treasury Reserve",
+        toName: student.name,
+        timestamp: now,
+        category: "ISSUANCE",
+        memo: `Minted via Nonce ${solution.nonce} & Dispatched to ${student.instituteName} for ${student.name}`,
+        action: "MINT",
+      };
+
+      const coinSignPayload = `COIN_CERT|${coinId}|${generationId}|${i}|${coinValue}|${now}`;
+      const mintSignature = this.treasury?.privateKey
+        ? signMessage(this.treasury.privateKey, coinSignPayload)
+        : sha256(coinSignPayload);
+
+      mintedCoins.push({
+        coinId,
+        displaySerial,
+        batchId: generationId,
+        serialNumber: i,
+        denomination: coinValue,
+        issuer: treasuryAddress,
+        mintedAt: now,
+        currentOwner: studentOwner,
+        currentOwnerName: student.name,
+        status: "ACTIVE",
+        mintSignature,
+        history: [mintEntry],
+        studentId: student.studentId,
+        studentName: student.name,
+        instituteId: student.instituteId,
+        instituteName: student.instituteName,
+        generationId,
+        institutionalStatus: "PRE_AUTHORIZED",
+      });
+    }
+
+    if (!this.state.coins) this.state.coins = [];
+    this.state.coins.push(...mintedCoins);
+
+    // Create Batch record for Merkle verification
+    const coinIdsList = mintedCoins.map((c) => c.coinId);
+    const batchRoot = computeBatchMerkleRoot(coinIdsList);
+    const coinBatchRecord: CoinBatch = {
+      batchId: generationId,
+      batchNumber: this.state.generationRecords.length + 1,
+      totalCoins: amountCoins,
+      denomination: coinValue,
+      totalValueINR: totalValueInr,
+      startSerial: 1,
+      endSerial: amountCoins,
+      merkleRoot: batchRoot,
+      issuerAddress: treasuryAddress,
+      issuerSignature: solution.hash,
+      timestamp: now,
+      allocatedStudentId: student.studentId,
+      allocatedStudentName: student.name,
+      allocatedRecipient: `${student.name} (${student.instituteName})`,
+    };
+    if (!this.state.coinBatches) this.state.coinBatches = [];
+    this.state.coinBatches.push(coinBatchRecord);
+
     // Create Generation / Allocation Record (NO wallet transfer)
     const generationRecord: GenerationRecord = {
       generationId,
@@ -384,6 +562,7 @@ export class Blockchain {
       hash: solution.hash,
       governmentAuthorityId,
       encryptedPayload: encrypted,
+      coinIds: coinIdsList,
     };
 
     // Create Audit Record (Chained to previous audit record)
@@ -702,6 +881,7 @@ export class Blockchain {
       expiryOf: (a) => this.expiryOf(a),
       now: this.getEffectiveTime(),
       sectorPolicy: isFeatureEnabled("sectorPolicy", stage),
+      coinMap: this.coinMap,
     };
   }
 
@@ -724,7 +904,16 @@ export class Blockchain {
       memo: input.memo,
       timestamp: now,
       status: "PENDING",
+      coinIds: input.coinIds,
     };
+
+    // If coin IDs were not explicitly specified on transfer, auto-select active coins from sender
+    if (input.type === "TRANSFER" && (!base.coinIds || base.coinIds.length === 0) && input.from) {
+      const availableCoins = this.getCoinsByOwner(input.from).filter((c) => c.status === "ACTIVE");
+      if (availableCoins.length >= input.amount) {
+        base.coinIds = availableCoins.slice(0, input.amount).map((c) => c.coinId);
+      }
+    }
 
     if (input.type === "MINT") {
       const recipient = this.getWallet(input.to);
@@ -763,7 +952,17 @@ export class Blockchain {
 
     const policyOn = isFeatureEnabled("smartContract", stage);
     if (policyOn) {
-      const result = validateTransaction(input, this.contractContext(stage));
+      const result = validateTransaction(
+        {
+          type: base.type,
+          from: base.from,
+          to: base.to,
+          amount: base.amount,
+          category: base.category,
+          coinIds: base.coinIds,
+        },
+        this.contractContext(stage)
+      );
       const payload = txSigningPayload(base);
       const sigOk =
         !!base.signature &&
@@ -825,13 +1024,72 @@ export class Blockchain {
       if (tx.type === "SETTLE" || tx.type === "CLAWBACK") {
         this.state.reserveINR = Math.max(0, this.state.reserveINR - tx.amount);
       }
+
+      // Update individual coin ownership and provenance ledger
+      if (tx.coinIds && tx.coinIds.length > 0) {
+        const toWallet = this.getWallet(tx.to);
+        const fromWallet = tx.from ? this.getWallet(tx.from) : undefined;
+        for (const cid of tx.coinIds) {
+          const coin = this.getCoin(cid);
+          if (!coin) continue;
+
+          if (tx.type === "TRANSFER") {
+            coin.currentOwner = tx.to;
+            coin.currentOwnerName = toWallet?.name ?? tx.to;
+            if (toWallet?.role === "INSTITUTION") {
+              coin.institutionalStatus = "COLLECTED_AS_FEE";
+            }
+            coin.history.push({
+              txId: tx.id,
+              from: tx.from,
+              to: tx.to,
+              fromName: fromWallet?.name ?? tx.from ?? "Unknown",
+              toName: toWallet?.name ?? tx.to,
+              timestamp: tx.timestamp,
+              category: tx.category,
+              memo: tx.memo,
+              action: "TRANSFER",
+              signature: tx.signature,
+              blockIndex: result.block.index,
+            });
+          } else if (tx.type === "SETTLE") {
+            coin.status = "REDEEMED";
+            coin.institutionalStatus = "REDEEMED_AT_BANK";
+            coin.currentOwner = this.treasury?.address ?? tx.to;
+            coin.currentOwnerName = this.treasury?.name ?? "Government Treasury";
+            coin.history.push({
+              txId: tx.id,
+              from: tx.from,
+              to: this.treasury?.address ?? tx.to,
+              fromName: fromWallet?.name ?? tx.from ?? "Unknown",
+              toName: this.treasury?.name ?? "Government Treasury",
+              timestamp: tx.timestamp,
+              category: "SETTLEMENT",
+              memo: tx.memo,
+              action: "SETTLE",
+              signature: tx.signature,
+              blockIndex: result.block.index,
+            });
+          }
+        }
+      }
     }
     return result;
   }
 
-  settle(fromAddress: string, amount: number): SubmitResult {
+  settle(fromAddress: string, amount: number, coinIds?: string[]): SubmitResult {
     const wallet = this.getWallet(fromAddress);
     const now = this.getEffectiveTime();
+
+    // Auto-select active coins if not explicitly provided
+    let resolvedCoinIds = coinIds;
+    if (!resolvedCoinIds || resolvedCoinIds.length === 0) {
+      const activeCoins = this.getCoinsByOwner(fromAddress).filter((c) => c.status === "ACTIVE");
+      if (activeCoins.length >= amount) {
+        resolvedCoinIds = activeCoins.slice(0, amount).map((c) => c.coinId);
+      }
+    }
+
     const base: Transaction = {
       id: randomId(),
       type: "SETTLE",
@@ -842,6 +1100,7 @@ export class Blockchain {
       memo: `${wallet?.name ?? "Holder"} redeemed ${amount} EDU for INR`,
       timestamp: now,
       status: "PENDING",
+      coinIds: resolvedCoinIds,
     };
     const fail = (reason: string) => {
       base.status = "REJECTED";

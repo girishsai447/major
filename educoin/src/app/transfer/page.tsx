@@ -53,12 +53,27 @@ export default function TransferPage() {
     [everyone, sectorOn, from]
   );
   const fromBalance = data?.balances.find((b) => b.address === from)?.balance ?? 0;
+  const userCoins = useMemo(
+    () =>
+      ((data?.coins as import("@/lib/types").EduCoinUnit[]) ?? []).filter(
+        (c) => c.currentOwner.toLowerCase() === from.toLowerCase() && c.status === "ACTIVE"
+      ),
+    [data, from]
+  );
 
   if (!enabled("transfers")) return <LockedPage feature="transfers" />;
 
   const simulate = async () => {
     if (!from || !to) return;
-    const res = await api.validate({ type: "TRANSFER", from, to, amount, category });
+    const selectedCoinIds = userCoins.slice(0, amount).map((c) => c.coinId);
+    const res = await api.validate({
+      type: "TRANSFER",
+      from,
+      to,
+      amount,
+      category,
+      coinIds: selectedCoinIds.length > 0 ? selectedCoinIds : undefined,
+    });
     setChecks(res.checks);
   };
 
@@ -67,7 +82,15 @@ export default function TransferPage() {
     setBusy(true);
     setResult(null);
     try {
-      const res = await api.transfer(from, to, amount, category, memo || undefined);
+      const selectedCoinIds = userCoins.slice(0, amount).map((c) => c.coinId);
+      const res = await api.transfer(
+        from,
+        to,
+        amount,
+        category,
+        memo || undefined,
+        selectedCoinIds.length > 0 ? selectedCoinIds : undefined
+      );
       setChecks(res.transaction.contractChecks ?? null);
       if (res.accepted) {
         setResult({ ok: true, text: "✅ Transaction accepted into the mempool. Mine to confirm." });
@@ -133,6 +156,24 @@ export default function TransferPage() {
                   Available balance: <EDU amount={fromBalance} />
                 </div>
               )}
+              {from && userCoins.length > 0 && (
+                <div className="mt-2 rounded-xl bg-indigo-50/70 p-2.5 border border-indigo-100 text-xs">
+                  <div className="flex items-center justify-between font-semibold text-indigo-900">
+                    <span>💎 Serialized Coins in Wallet:</span>
+                    <span>{userCoins.length} verified units</span>
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap gap-1 font-mono text-[10px]">
+                    {userCoins.slice(0, 8).map((c) => (
+                      <span key={c.coinId} className="rounded bg-white px-1.5 py-0.5 border border-indigo-200 text-indigo-700">
+                        {c.displaySerial}
+                      </span>
+                    ))}
+                    {userCoins.length > 8 && (
+                      <span className="text-slate-400 self-center">+{userCoins.length - 8} more</span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
             <div>
@@ -196,6 +237,44 @@ export default function TransferPage() {
                 className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-brand-400"
               />
             </div>
+
+            {/* Institutional Fee Cross-Check & Anti-Duplication Box */}
+            {to && recipients.find((r) => r.address === to)?.role === "INSTITUTION" && (
+              <div className="rounded-xl border border-indigo-200 bg-indigo-50/60 p-3 text-xs space-y-1.5">
+                <div className="flex items-center justify-between font-semibold text-indigo-950">
+                  <span className="flex items-center gap-1.5">
+                    <span>🏛️</span> Institutional Fee Anti-Duplication Pre-Check
+                  </span>
+                  <span className="text-[10px] rounded bg-indigo-100 px-1.5 py-0.5 text-indigo-800 font-mono">
+                    Rule R11 + R5b Guard
+                  </span>
+                </div>
+                <p className="text-slate-600 leading-relaxed text-[11px]">
+                  When paying tuition fees to <b>{recipients.find((r) => r.address === to)?.name}</b>, the institution will cross-check each of the{" "}
+                  <b>{Math.min(amount, userCoins.length)} individual coin addresses</b> against its pre-registered
+                  dispatched whitelist. Duplicate or unauthorized coins are strictly rejected by the smart contract!
+                </p>
+                {amount > 0 && userCoins.length > 0 && (
+                  <div className="pt-1.5 border-t border-indigo-100">
+                    <span className="text-[10px] text-slate-500 font-mono">
+                      Bundled Serialized Coin Identifiers ({Math.min(amount, userCoins.length)} units):
+                    </span>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {userCoins.slice(0, amount).slice(0, 6).map((c) => (
+                        <span key={c.coinId} className="rounded bg-white px-1.5 py-0.5 border border-indigo-200 font-mono text-[9px] text-indigo-700">
+                          {c.displaySerial}
+                        </span>
+                      ))}
+                      {amount > 6 && (
+                        <span className="text-slate-400 self-center text-[10px]">
+                          +{amount - 6} more
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="flex flex-wrap gap-2 pt-1">
               <Button onClick={submit} disabled={busy || !from || !to}>

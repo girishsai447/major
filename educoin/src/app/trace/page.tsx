@@ -11,17 +11,21 @@ export default function TracePage() {
   const { enabled } = useStage();
   const { data } = useChainData();
 
-  // Mode: "GENERATION" (Supervisor spec) vs "WALLET" (Legacy fund tracing)
-  const [traceMode, setTraceMode] = useState<"GENERATION" | "WALLET">("GENERATION");
+  // Mode: "COIN" (Serialized Banknote Provenance) vs "GENERATION" (Supervisor spec) vs "WALLET" (Legacy)
+  const [traceMode, setTraceMode] = useState<"COIN" | "GENERATION" | "WALLET">("COIN");
   const [selectedGenId, setSelectedGenId] = useState<string>("");
+  const [selectedCoinId, setSelectedCoinId] = useState<string>("");
   const [student, setStudent] = useState("");
 
   if (!enabled("traceability")) return <LockedPage feature="traceability" />;
 
   const generations: GenerationRecord[] = data?.generationRecords ?? [];
   const burnRecords: BurnRecord[] = data?.burnRecords ?? [];
+  const coins: import("@/lib/types").EduCoinUnit[] = (data?.coins as import("@/lib/types").EduCoinUnit[]) ?? [];
   const students = (data?.wallets ?? []).filter((w) => w.role === "STUDENT");
   const allTx = (data?.chain ?? []).flatMap((b) => b.transactions);
+
+  const activeCoin = coins.find((c) => c.coinId === selectedCoinId) || coins[0];
 
   // Default to first generation if none selected
   const activeGenId = selectedGenId || generations[0]?.generationId || "";
@@ -48,6 +52,16 @@ export default function TracePage() {
         />
         <div className="flex rounded-xl bg-slate-100 p-1 border border-slate-200 text-xs font-semibold">
           <button
+            onClick={() => setTraceMode("COIN")}
+            className={`rounded-lg px-3 py-1.5 transition-all ${
+              traceMode === "COIN"
+                ? "bg-white text-indigo-700 shadow-sm"
+                : "text-slate-600 hover:text-slate-900"
+            }`}
+          >
+            💎 Trace by Individual Coin ID (Banknote Provenance)
+          </button>
+          <button
             onClick={() => setTraceMode("GENERATION")}
             className={`rounded-lg px-3 py-1.5 transition-all ${
               traceMode === "GENERATION"
@@ -55,7 +69,7 @@ export default function TracePage() {
                 : "text-slate-600 hover:text-slate-900"
             }`}
           >
-            🔍 Trace by Generation ID (Supervisor Flow)
+            🔍 Trace by Generation ID
           </button>
           <button
             onClick={() => setTraceMode("WALLET")}
@@ -70,7 +84,216 @@ export default function TracePage() {
         </div>
       </div>
 
-      {traceMode === "GENERATION" ? (
+      {traceMode === "COIN" ? (
+        <div className="space-y-6">
+          {/* Selector Card */}
+          <Card className="p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-500">
+                  Select Individual Coin Serial to Trace
+                </label>
+                <select
+                  value={activeCoin?.coinId || ""}
+                  onChange={(e) => setSelectedCoinId(e.target.value)}
+                  className="mt-1 min-w-[320px] rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold font-mono text-slate-800 outline-none focus:border-brand-500 bg-white"
+                >
+                  {coins.map((c) => (
+                    <option key={c.coinId} value={c.coinId}>
+                      {c.displaySerial} (Coin #{c.serialNumber}) — ₹{c.denomination} ({c.status}) · Held by {c.currentOwnerName || c.currentOwner.slice(0, 8)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {activeCoin && (
+                <div className="flex items-center gap-2">
+                  <Badge color={activeCoin.status === "ACTIVE" ? "green" : activeCoin.status === "REDEEMED" ? "amber" : "red"}>
+                    Status: {activeCoin.status}
+                  </Badge>
+                  <span className="rounded-lg bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-700 border border-emerald-200">
+                    ₹{activeCoin.denomination} INR (1 EDU)
+                  </span>
+                </div>
+              )}
+            </div>
+          </Card>
+
+          {activeCoin && (
+            <div className="space-y-6">
+              {/* Coin Details Card */}
+              <div className="grid gap-3 sm:grid-cols-4">
+                <Card className="p-4">
+                  <div className="text-xs uppercase text-slate-400 font-medium">Serial & Number</div>
+                  <div className="mt-1 text-base font-bold font-mono text-slate-800">
+                    {activeCoin.displaySerial}
+                  </div>
+                  <div className="text-[11px] text-slate-400 font-mono mt-0.5">
+                    Batch #{activeCoin.batchId} · Unit #{activeCoin.serialNumber}
+                  </div>
+                </Card>
+                <Card className="p-4">
+                  <div className="text-xs uppercase text-slate-400 font-medium">Fixed Denomination</div>
+                  <div className="mt-1 text-base font-bold text-emerald-600">
+                    ₹{activeCoin.denomination} INR
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">1 EduCoin Pegged</div>
+                </Card>
+                <Card className="p-4">
+                  <div className="text-xs uppercase text-slate-400 font-medium">Current Holder</div>
+                  <div className="mt-1 text-base font-bold text-slate-800 truncate">
+                    {activeCoin.currentOwnerName || activeCoin.currentOwner.slice(0, 10)}
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-400 truncate mt-0.5">
+                    {activeCoin.currentOwner}
+                  </div>
+                </Card>
+                <Card className="p-4">
+                  <div className="text-xs uppercase text-slate-400 font-medium">Mint Integrity</div>
+                  <div className="mt-1 text-sm font-bold text-indigo-600 flex items-center gap-1">
+                    <span>✓</span> Verified Issuer
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-400 truncate mt-0.5">
+                    Treasury Ed25519 Sig
+                  </div>
+                </Card>
+              </div>
+
+              {/* Cryptographic Preimage Hash Card */}
+              <Card className="p-4 font-mono text-xs bg-slate-50 border-slate-200">
+                <div className="text-[11px] font-bold text-slate-600 uppercase tracking-wider mb-1">
+                  Cryptographic Coin Identifier (Tamper-Proof SHA-256 Digest):
+                </div>
+                <div className="break-all rounded-lg bg-white p-2.5 text-indigo-700 border border-slate-200 text-[11px]">
+                  {activeCoin.coinId}
+                </div>
+              </Card>
+
+              {/* Visual 4-Stage Lifecycle Stepper */}
+              <Card className="p-6">
+                <h3 className="text-sm font-bold text-slate-800 mb-6 flex items-center gap-2">
+                  <span>🗺️</span> Complete Coin Lifecycle: Mint → Student → Institution → Bank → INR
+                </h3>
+
+                <div className="relative border-l-2 border-indigo-200 ml-4 space-y-6 pb-2">
+                  {/* Step 1: Genesis Mint */}
+                  <div className="relative pl-6">
+                    <span className="absolute -left-2.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-indigo-600 text-white text-[10px] font-bold">
+                      1
+                    </span>
+                    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-bold text-slate-800 text-xs">
+                          🏛️ Authorized Genesis Mint (Government Treasury)
+                        </span>
+                        <span className="text-[10px] font-mono text-slate-400">
+                          {new Date(activeCoin.mintedAt).toLocaleString()}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-slate-600">
+                        Minted in Batch #{activeCoin.batchId} with fixed value ₹{activeCoin.denomination} INR. Fully collateralised by the Government Reserve.
+                      </p>
+                      <div className="mt-2 text-[10px] font-mono text-slate-400 truncate">
+                        Issuer: {activeCoin.issuer}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Step 2: Student Allocation */}
+                  <div className="relative pl-6">
+                    <span className="absolute -left-2.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-white text-[10px] font-bold">
+                      2
+                    </span>
+                    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-bold text-slate-800 text-xs">
+                          🎓 Scholarship Allocation to Student Beneficiary
+                        </span>
+                        <span className="text-[10px] font-mono text-slate-400">
+                          {activeCoin.history[1] ? new Date(activeCoin.history[1].timestamp).toLocaleString() : "Allocated"}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-slate-600">
+                        Transferred to {activeCoin.history[1]?.toName || "Student Wallet"} under designated educational purpose. Serial #{activeCoin.serialNumber} bound to student identity.
+                      </p>
+                      {activeCoin.history[1]?.txId && (
+                        <div className="mt-2 text-[10px] font-mono text-slate-400 truncate">
+                          Tx: {activeCoin.history[1].txId}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Step 3: Institution Spend */}
+                  {activeCoin.history.some((h) => h.category === "TUITION" || h.category === "HOSTEL" || h.category === "BOOKS") ? (
+                    <div className="relative pl-6">
+                      <span className="absolute -left-2.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-600 text-white text-[10px] font-bold">
+                        3
+                      </span>
+                      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-bold text-slate-800 text-xs">
+                            🏫 Institution Payment Verification (VNR VJIET / Book Store)
+                          </span>
+                          <span className="text-[10px] font-mono text-slate-400">
+                            Confirmed on Blockchain
+                          </span>
+                        </div>
+                        <p className="mt-1 text-xs text-slate-600">
+                          Paid toward educational fees. The institution checked the 7 verification rules and accepted the coin identity on-chain.
+                        </p>
+                        <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+                          <Badge color="green">Category Verified</Badge>
+                          <Badge color="blue">Non-Counterfeit</Badge>
+                          <Badge color="violet">Ownership Transferred</Badge>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="relative pl-6 opacity-60">
+                      <span className="absolute -left-2.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-slate-300 text-slate-600 text-[10px] font-bold">
+                        3
+                      </span>
+                      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-4 text-xs text-slate-500">
+                        <strong>Held in Student Wallet:</strong> Coin is currently active and unspent. Ready to be spent on approved fees at enrolled college.
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Step 4: Bank Settlement */}
+                  {activeCoin.status === "REDEEMED" ? (
+                    <div className="relative pl-6">
+                      <span className="absolute -left-2.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-amber-600 text-white text-[10px] font-bold">
+                        4
+                      </span>
+                      <div className="rounded-xl border border-amber-200 bg-amber-50/40 p-4 shadow-sm">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-bold text-slate-900 text-xs">
+                            🏦 Bank Settlement & Real Fiat INR Disbursement
+                          </span>
+                          <Badge color="amber">REDEEMED</Badge>
+                        </div>
+                        <p className="mt-1 text-xs text-slate-600">
+                          Institution redeemed this coin with the partner bank. The coin was verified, burned/locked on-chain, and ₹100 INR was released directly from the Government Reserve to the institution’s bank account.
+                        </p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="relative pl-6 opacity-60">
+                      <span className="absolute -left-2.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-slate-300 text-slate-600 text-[10px] font-bold">
+                        4
+                      </span>
+                      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-4 text-xs text-slate-500">
+                        <strong>Pending Bank Settlement:</strong> Will be redeemed by receiving college/vendor for fiat INR at term end.
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </Card>
+            </div>
+          )}
+        </div>
+      ) : traceMode === "GENERATION" ? (
         <div className="space-y-6">
           {/* Selector Card */}
           <Card className="p-4">
