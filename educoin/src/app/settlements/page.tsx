@@ -31,6 +31,14 @@ export default function SettlementsPage() {
   );
   const balanceOf = (addr: string) => data?.balances.find((b) => b.address === addr)?.balance ?? 0;
 
+  const redeemerCoins = useMemo(
+    () =>
+      ((data?.coins as import("@/lib/types").EduCoinUnit[]) ?? []).filter(
+        (c) => c.currentOwner.toLowerCase() === redeemer.toLowerCase() && c.status === "ACTIVE"
+      ),
+    [data, redeemer]
+  );
+
   // Students whose scholarship has expired but still hold a balance.
   const now = Date.now();
   const expiredStudents = useMemo(() => {
@@ -61,10 +69,20 @@ export default function SettlementsPage() {
     setBusy(true);
     setMsg(null);
     try {
-      const res = await api.settle(redeemer, amount);
+      const selectedCoinIds = redeemerCoins.slice(0, amount).map((c) => c.coinId);
+      const res = await api.settle(
+        redeemer,
+        amount,
+        selectedCoinIds.length > 0 ? selectedCoinIds : undefined
+      );
       if (res.accepted) {
         await api.mine("Settlement Node");
-        setMsg({ ok: true, text: "✅ Redemption settled — EduCoin burned, INR released from reserve." });
+        setMsg({
+          ok: true,
+          text: `✅ Bank verified & settled ${amount} EduCoins — ₹${(
+            amount * 100
+          ).toLocaleString()} INR disbursed from reserve.`,
+        });
       } else {
         setMsg({ ok: false, text: `❌ ${res.reason}` });
       }
@@ -138,6 +156,11 @@ export default function SettlementsPage() {
               </option>
             ))}
           </select>
+          {redeemer && redeemerCoins.length > 0 && (
+            <div className="mt-2 rounded-xl bg-amber-50 p-2.5 border border-amber-200 text-xs text-amber-800">
+              <span className="font-semibold">💎 Bank Settlement Audit Ready:</span> {redeemerCoins.length} active serialized coins held (valued at ₹{(redeemerCoins.length * 100).toLocaleString()} INR). The partner bank verifies each coin identity before releasing fiat INR.
+            </div>
+          )}
           <label className="mt-3 mb-1 block text-xs font-medium text-slate-500">Amount (EDU)</label>
           <input
             type="number"

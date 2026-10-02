@@ -87,6 +87,8 @@ export function snapshot(chain: Blockchain, stage: Stage) {
     wallets: publicWallets,
     balances,
     rejected: chain.state.rejected,
+    coins: chain.state.coins || [],
+    coinBatches: chain.state.coinBatches || [],
   };
 }
 

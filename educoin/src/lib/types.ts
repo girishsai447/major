@@ -45,6 +45,7 @@ export interface Transaction {
   academicCompletionDate?: number;
   instituteExpiryAt?: number;
   generationId?: string;
+  coinIds?: string[]; // Identifiers of individual serialized EduCoins transferred
 }
 
 export interface Wallet {
@@ -145,6 +146,7 @@ export interface GenerationRecord {
   hash: string;
   governmentAuthorityId: string;
   encryptedPayload?: EncryptedPayload;
+  coinIds?: string[]; // Unique cryptographic coin addresses generated in this block
 }
 
 export interface BurnRecord {
@@ -192,6 +194,93 @@ export interface AuditRecord {
   currentAuditHash: string;
 }
 
+// -----------------------------------------------------------------------------
+// Individual Serialized EduCoin Domain Models (Unit Identity, Provenance, Batches)
+// -----------------------------------------------------------------------------
+
+export type CoinUnitStatus = "ACTIVE" | "TRANSFERRED" | "REDEEMED" | "FROZEN";
+
+export interface CoinProvenanceEntry {
+  txId: string;
+  from: string | null;
+  to: string;
+  fromName?: string;
+  toName?: string;
+  timestamp: number;
+  category?: Category | null;
+  memo?: string;
+  action: "MINT" | "TRANSFER" | "SETTLE" | "CLAWBACK";
+  signature?: string;
+  blockIndex?: number;
+}
+
+export interface EduCoinUnit {
+  coinId: string; // Cryptographic hash derived from Issuer + Batch + Serial + Denom + Timestamp
+  displaySerial: string; // e.g. "EDU-B1-0001" (Coin #1)
+  batchId: string; // e.g. "BATCH-0001"
+  serialNumber: number; // 1 to 100
+  denomination: number; // 100 INR fixed peg
+  issuer: string; // Authorized Government Treasury address
+  mintedAt: number; // Block / Minting timestamp
+  currentOwner: string; // Wallet address of current holder
+  currentOwnerName?: string;
+  status: CoinUnitStatus; // ACTIVE, REDEEMED (Burned for INR), FROZEN
+  mintSignature: string; // Ed25519 digital signature of the Issuer certifying authenticity
+  merkleProof?: string[]; // Merkle tree inclusion proof against batch Merkle root
+  history: CoinProvenanceEntry[]; // Tamper-evident transaction and ownership history
+  studentId?: string; // STU001
+  studentName?: string;
+  instituteId?: string; // e.g. INST-VNR (Respected institution notified upon minting)
+  instituteName?: string; // e.g. VNR VJIET
+  generationId?: string; // Linked block generation ID
+  institutionalStatus?: "PRE_AUTHORIZED" | "COLLECTED_AS_FEE" | "REDEEMED_AT_BANK";
+}
+
+export interface CoinBatch {
+  batchId: string;
+  batchNumber: number;
+  totalCoins: number; // e.g. 100
+  denomination: number; // 100
+  totalValueINR: number; // e.g. 10,000 INR
+  startSerial: number; // e.g. 1
+  endSerial: number; // e.g. 100
+  merkleRoot: string; // Cryptographic Merkle Root over all coinIds in this batch
+  issuerAddress: string;
+  issuerSignature: string;
+  timestamp: number;
+  allocatedStudentId?: string;
+  allocatedStudentName?: string;
+  allocatedRecipient?: string;
+}
+
+export interface CoinVerificationCheck {
+  id: string;
+  ruleName: string;
+  passed: boolean;
+  details: string;
+}
+
+export interface CoinBatchVerificationResult {
+  allValid: boolean;
+  totalChecked: number;
+  validCount: number;
+  totalValueINR: number;
+  expectedOwner?: string;
+  checks: CoinVerificationCheck[];
+  coins: {
+    coinId: string;
+    displaySerial: string;
+    serialNumber: number;
+    batchId: string;
+    status: CoinUnitStatus;
+    currentOwner: string;
+    currentOwnerName?: string;
+    valid: boolean;
+    failureReason?: string;
+    mintedBy: string;
+  }[];
+}
+
 export interface ChainState {
   chain: Block[];
   mintingBlocks: MintingBlock[];
@@ -207,6 +296,8 @@ export interface ChainState {
   createdAt: number;
   reserveINR: number; // INR held in reserve to back circulating EduCoin (the peg)
   demoClockOffsetMs?: number; // Demo clock fast-forward offset in ms
+  coins?: EduCoinUnit[]; // Individual serialized coin units registry
+  coinBatches?: CoinBatch[]; // Batches of serialized coins minted
 }
 
 export interface Balance {

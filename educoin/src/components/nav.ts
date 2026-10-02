@@ -19,6 +19,7 @@ export const NAV: NavItem[] = [
   { href: "/treasury", label: "Reserve & Peg", icon: "🏦", feature: "reserve", group: "EduCoin" },
   { href: "/mint", label: "Issue Scholarship", icon: "🪙", feature: "minting", group: "EduCoin" },
   { href: "/transfer", label: "Spend EduCoin", icon: "💸", feature: "transfers", group: "EduCoin" },
+  { href: "/coins", label: "Coin Registry & Verification", icon: "💎", feature: "wallets", group: "EduCoin" },
 
   { href: "/contract", label: "Smart Contract", icon: "📜", feature: "smartContract", group: "Governance" },
   { href: "/audit", label: "Audit Trail", icon: "🛡️", feature: "auditTrail", group: "Governance" },

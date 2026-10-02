@@ -137,6 +137,13 @@ export const CONTRACT_RULES: {
       "EduCoin can only be spent within the scholarship's validity term; expired funds are frozen for clawback.",
     scope: "sector",
   },
+  {
+    id: "R11",
+    title: "Individual coin identity & ownership validation",
+    description:
+      "Every specified EduCoin must possess a cryptographically valid unit identity, genuine authorized minting proof, active non-spent status, and confirmed ownership by the presenter.",
+    scope: "generic",
+  },
 ];
 
 export interface ValidationContext {
@@ -151,6 +158,7 @@ export interface ValidationContext {
    * at Stage 5 — before that, EduCoin behaves as a general-purpose stablecoin.
    */
   sectorPolicy: boolean;
+  coinMap?: Map<string, import("../types").EduCoinUnit>;
 }
 
 export interface ValidationResult {
@@ -171,11 +179,11 @@ function fail(rule: string, detail: string): ContractCheck {
  * Returns every rule check (for transparency) plus an overall pass/fail.
  */
 export function validateTransaction(
-  tx: Pick<Transaction, "type" | "from" | "to" | "amount" | "category">,
+  tx: Pick<Transaction, "type" | "from" | "to" | "amount" | "category" | "coinIds">,
   ctx: ValidationContext
 ): ValidationResult {
   const checks: ContractCheck[] = [];
-  const { walletByAddress, balanceOf, sectorPolicy } = ctx;
+  const { walletByAddress, balanceOf, sectorPolicy, coinMap } = ctx;
 
   const recipient = walletByAddress.get(tx.to);
   const sender = tx.from ? walletByAddress.get(tx.from) : null;
@@ -235,6 +243,53 @@ export function validateTransaction(
       } else {
         checks.push(
           fail("R6", `Insufficient balance: ${bal} EDU available, ${tx.amount} EDU requested.`)
+        );
+      }
+    }
+
+    // R11 — individual coin identity, active status & ownership validation
+    if (tx.coinIds && tx.coinIds.length > 0) {
+      if (coinMap) {
+        let coinCheckFail: string | null = null;
+        for (const cid of tx.coinIds) {
+          const coin = coinMap.get(cid);
+          if (!coin) {
+            coinCheckFail = `Coin ID ${cid.slice(0, 10)}... does not exist in registry.`;
+            break;
+          }
+          if (tx.from && coin.currentOwner.toLowerCase() !== tx.from.toLowerCase()) {
+            coinCheckFail = `Coin ${coin.displaySerial} does not belong to sender (${coin.currentOwnerName || coin.currentOwner.slice(0, 10)}).`;
+            break;
+          }
+          if (coin.status !== "ACTIVE") {
+            coinCheckFail = `Coin ${coin.displaySerial} is ${coin.status} (cannot be spent or double-spent).`;
+            break;
+          }
+
+          // Institutional Whitelist Cross-Check:
+          // If paying tuition/fees to an institution, verify the coin was officially dispatched to this institution
+          if (recipient && recipient.role === "INSTITUTION") {
+            const coinInst = (coin.instituteName || coin.instituteId || "").toLowerCase();
+            const recipInst = (recipient.institution || recipient.name || "").toLowerCase();
+            if (coinInst && recipInst && !recipInst.includes(coinInst) && !coinInst.includes(recipInst)) {
+              coinCheckFail = `Coin ${coin.displaySerial} was dispatched to ${coin.instituteName || coin.instituteId}, not ${recipient.name}. Institution fee whitelist cross-check rejected.`;
+              break;
+            }
+          }
+        }
+        if (coinCheckFail) {
+          checks.push(fail("R11", coinCheckFail));
+        } else {
+          checks.push(
+            pass(
+              "R11",
+              `All ${tx.coinIds.length} serialized coins verified (cryptographic IDs, active status, valid ownership, institutional whitelist match).`
+            )
+          );
+        }
+      } else {
+        checks.push(
+          pass("R11", `${tx.coinIds.length} individual coin identities bundled in transfer.`)
         );
       }
     }

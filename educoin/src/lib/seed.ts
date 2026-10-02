@@ -146,6 +146,54 @@ export function seedDemoScenario(chain: Blockchain, _stage: Stage): void {
     governmentAuthorityId: "GOV-MINISTRY-EDU",
   });
 
+  // --- 3b) Mint 100 Serialized EduCoins (₹10,000 INR) with Unique Identifiers ---
+  // Guide Specification:
+  // Mint 100 EduCoins, where each individual coin has a unique cryptographic identity:
+  // - Student 1 (Girish, STU001, VNR VJIET): Coins 1–50
+  // - Student 2 (Sai Sanjeeth, STU002, VNR VJIET): Coins 51–100
+  const { coins: all100Coins } = chain.mintSerializedBatch({
+    totalCoins: 100,
+    allocatedRecipient: "Student Beneficiaries (Girish & Sanjeeth)",
+    initialOwner: govt.address,
+    initialOwnerName: govt.name,
+  });
+
+  // Distribute Coins 1–50 to Student 1 and Coins 51–100 to Student 2
+  const student1Coins = all100Coins.slice(0, 50);
+  const student2Coins = all100Coins.slice(50, 100);
+
+  for (const c of student1Coins) {
+    c.currentOwner = girishW.address;
+    c.currentOwnerName = girishW.name;
+    c.history.push({
+      txId: `ALLOC-S1-${c.serialNumber}`,
+      from: govt.address,
+      to: girishW.address,
+      fromName: govt.name,
+      toName: girishW.name,
+      timestamp: Date.now() - 3600000,
+      category: "ISSUANCE",
+      memo: `Distributed Coin #${c.serialNumber} to ${girishW.name}`,
+      action: "TRANSFER",
+    });
+  }
+
+  for (const c of student2Coins) {
+    c.currentOwner = sanjeethW.address;
+    c.currentOwnerName = sanjeethW.name;
+    c.history.push({
+      txId: `ALLOC-S2-${c.serialNumber}`,
+      from: govt.address,
+      to: sanjeethW.address,
+      fromName: govt.name,
+      toName: sanjeethW.name,
+      timestamp: Date.now() - 3600000,
+      category: "ISSUANCE",
+      memo: `Distributed Coin #${c.serialNumber} to ${sanjeethW.name}`,
+      action: "TRANSFER",
+    });
+  }
+
   // --- 4) Seed standard wallet transfers & spends for existing viva stages --
   const studentWallets = [girishW, sanjeethW, siddharthaW, jeevanW, aishaW, lapsedW];
   for (const s of studentWallets) {
@@ -163,7 +211,61 @@ export function seedDemoScenario(chain: Blockchain, _stage: Stage): void {
   }
   chain.mine("Government Node");
 
-  // Spend tuition, hostel, books
+  // Student 1 spends coins at VNR VJIET using verified individual coin IDs
+  // Coins 1–30 for Tuition fee (₹3,000 INR)
+  chain.submit(
+    {
+      type: "TRANSFER",
+      from: girishW.address,
+      to: vnr.address,
+      amount: 30,
+      category: "TUITION",
+      memo: "Semester 5 tuition fee (Coins 1–30 verified by VNR VJIET)",
+      coinIds: student1Coins.slice(0, 30).map((c) => c.coinId),
+    },
+    SEED_STAGE
+  );
+
+  // Coins 31–45 for Hostel fee (₹1,500 INR)
+  chain.submit(
+    {
+      type: "TRANSFER",
+      from: girishW.address,
+      to: vnr.address,
+      amount: 15,
+      category: "HOSTEL",
+      memo: "Hostel fee (Coins 31–45 verified by VNR VJIET)",
+      coinIds: student1Coins.slice(30, 45).map((c) => c.coinId),
+    },
+    SEED_STAGE
+  );
+
+  // Coins 46–47 for Books (₹200 INR)
+  chain.submit(
+    {
+      type: "TRANSFER",
+      from: girishW.address,
+      to: bookstore.address,
+      amount: 2,
+      category: "BOOKS",
+      memo: "Reference textbooks (Coins 46–47 verified by Book Store)",
+      coinIds: student1Coins.slice(45, 47).map((c) => c.coinId),
+    },
+    SEED_STAGE
+  );
+
+  // Mine the block confirming these spends
+  chain.mine("EduCoin Validator");
+
+  // VNR VJIET redeems Coins 1–20 with Bank for INR
+  chain.settle(
+    vnr.address,
+    20,
+    student1Coins.slice(0, 20).map((c) => c.coinId)
+  );
+  chain.mine("Settlement Node");
+
+  // Spend tuition, hostel, books for other students to maintain existing balance demos
   const spend = (
     from: string,
     to: string,
@@ -172,21 +274,16 @@ export function seedDemoScenario(chain: Blockchain, _stage: Stage): void {
     memo: string
   ) => chain.submit({ type: "TRANSFER", from, to, amount, category, memo }, SEED_STAGE);
 
-  spend(girishW.address, vnr.address, 300, "TUITION", "Semester 5 tuition fee");
-  spend(girishW.address, vnr.address, 120, "HOSTEL", "Hostel fee (block A)");
-  spend(girishW.address, bookstore.address, 20, "BOOKS", "Reference textbooks");
   spend(sanjeethW.address, vnr.address, 300, "TUITION", "Semester 5 tuition fee");
   spend(sanjeethW.address, vnr.address, 30, "EXAMINATION", "End-sem examination fee");
-  chain.mine("EduCoin Validator");
-
   spend(siddharthaW.address, vnr.address, 300, "TUITION", "Semester 5 tuition fee");
   spend(siddharthaW.address, vnr.address, 120, "HOSTEL", "Hostel fee (block B)");
   spend(jeevanW.address, cbit.address, 280, "TUITION", "Semester 5 tuition fee");
   spend(aishaW.address, bookstore.address, 25, "BOOKS", "Lab manuals & books");
   chain.mine("EduCoin Validator");
 
-  // Institution redeems EDU for INR
-  chain.settle(vnr.address, 400);
+  // Additional settlement for standard viva
+  chain.settle(vnr.address, 380);
   chain.mine("EduCoin Validator");
 
   // --- 5) Attempts the smart contract must REJECT (Audit trail demonstration) ---

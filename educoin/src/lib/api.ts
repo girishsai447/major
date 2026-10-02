@@ -85,11 +85,12 @@ export const api = {
     to: string,
     amount: number,
     category: Category,
-    memo?: string
+    memo?: string,
+    coinIds?: string[]
   ) =>
     jsonFetch<SubmitResponse>("/api/transfer", {
       method: "POST",
-      body: JSON.stringify({ from, to, amount, category, memo }),
+      body: JSON.stringify({ from, to, amount, category, memo, coinIds }),
     }),
 
   mine: (minerName?: string) =>
@@ -104,6 +105,7 @@ export const api = {
     to: string;
     amount: number;
     category?: Category | null;
+    coinIds?: string[];
   }) =>
     jsonFetch<ValidationResponse>("/api/validate", {
       method: "POST",
@@ -122,11 +124,33 @@ export const api = {
       body: JSON.stringify({ amount }),
     }),
 
-  settle: (from: string, amount: number) =>
+  settle: (from: string, amount: number, coinIds?: string[]) =>
     jsonFetch<SubmitResponse>("/api/settle", {
       method: "POST",
-      body: JSON.stringify({ from, amount }),
+      body: JSON.stringify({ from, amount, coinIds }),
     }),
+
+  // 7-Point Cryptographic Coin Verification
+  verifyCoins: (coinIds: string[], expectedOwner?: string, simulateTamper?: boolean) =>
+    jsonFetch<
+      import("./types").CoinBatchVerificationResult & { simulatedTamperApplied?: boolean }
+    >("/api/coins/verify", {
+      method: "POST",
+      body: JSON.stringify({ coinIds, expectedOwner, simulateTamper }),
+    }),
+
+  // Query individual coins and batches
+  getCoins: (params?: { owner?: string; batchId?: string; status?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.owner) q.set("owner", params.owner);
+    if (params?.batchId) q.set("batchId", params.batchId);
+    if (params?.status) q.set("status", params.status);
+    return jsonFetch<{
+      total: number;
+      batches: import("./types").CoinBatch[];
+      coins: import("./types").EduCoinUnit[];
+    }>(`/api/coins?${q.toString()}`);
+  },
 
   clawback: (student: string) =>
     jsonFetch<SubmitResponse>("/api/clawback", {
